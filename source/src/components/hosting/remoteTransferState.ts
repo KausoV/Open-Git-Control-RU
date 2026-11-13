@@ -1,0 +1,66 @@
+import { create } from 'zustand';
+import type {
+  GitPullRecoveryDto,
+  GitPushBatchDto,
+  GitPushPlanDto,
+  GitRemoteSnapshotDto,
+  RemotePreferences,
+  RemoteTransferOperations,
+} from '@/types/remoteTransfers';
+import type { SecretScanResultDto } from '@/types/gitDtos';
+import type { RemoteTransferDialog } from './remoteTransferDialogState';
+
+export interface RemoteTransferSelection {
+  selectedRemoteNames: string[];
+  branch: string;
+  targetBranches: Record<string, string>;
+  tagNames: string[];
+  profileId?: string | null;
+}
+export interface RemoteTransferState {
+  phase: 'idle' | 'preparing' | 'selection' | 'review' | 'running' | 'result';
+  busy: boolean;
+  cancelling: boolean;
+  transferStage: 'preparing' | 'scanning' | 'transferring';
+  scanProgressId: string | null;
+  intent: RemoteTransferDialog | null;
+  snapshot: GitRemoteSnapshotDto | null;
+  preferences: RemotePreferences;
+  selection: RemoteTransferSelection;
+  reason: string;
+  plan: GitPushPlanDto | null;
+  scan: SecretScanResultDto | null;
+  batch: GitPushBatchDto | null;
+  failedPull: RemoteTransferOperations['pull']['input'] | null;
+  pullRecovery: GitPullRecoveryDto | null;
+  retrying: boolean;
+  error: string;
+  resultVisible: boolean;
+}
+export const initialRemoteTransferState = (): RemoteTransferState => ({
+  phase: 'idle',
+  busy: false,
+  cancelling: false,
+  transferStage: 'preparing',
+  scanProgressId: null,
+  intent: null,
+  snapshot: null,
+  preferences: {},
+  selection: { selectedRemoteNames: [], branch: '', targetBranches: {}, tagNames: [] },
+  reason: '',
+  plan: null,
+  scan: null,
+  batch: null,
+  failedPull: null,
+  pullRecovery: null,
+  retrying: false,
+  error: '',
+  resultVisible: true,
+});
+export const useRemoteTransferState = create<RemoteTransferState>(() => initialRemoteTransferState());
+
+/** Keep outcomes for review while navigation opens a remedy behind the dialog. */
+export function hideRemoteTransferResult() {
+  const state = useRemoteTransferState.getState();
+  if (!state.busy && state.phase === 'result') useRemoteTransferState.setState({ resultVisible: false });
+}

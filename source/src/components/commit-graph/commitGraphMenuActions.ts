@@ -1,0 +1,78 @@
+import type { ConfirmDialogState, InputDialogState } from '@/components/layout/layoutTypes';
+import type { CatalogTranslateFn, TranslateFn } from '@/i18n';
+import type { ToastMessage, BranchInfo } from '@/types/git';
+import type { GraphLayout, GraphNode } from '@/utils/graphLayout';
+import type { MenuAction } from './CommitContextMenu';
+import { buildCommitHistoryMenuActions } from './commitGraphHistoryMenuActions';
+import { buildCommitRefMenuActions } from './commitGraphRefMenuActions';
+
+type BuildCommitMenuActionsParams = {
+  repoPath: string | null;
+  node: GraphNode;
+  branches: BranchInfo[];
+  currentBranch: string;
+  layout: GraphLayout | null;
+  reachableFromHead: Set<string>;
+  runGitAction: (args: string[], successMsg: string) => Promise<void> | void;
+  setConfirmDialog: (value: ConfirmDialogState | null) => void;
+  setInputDialog: (value: InputDialogState | null) => void;
+  setToast: (toast: ToastMessage | null) => void;
+  refreshCommits: () => Promise<void> | void;
+  refreshWorkingTreeStatus: () => Promise<void> | void;
+  onEditCommitMessage?: (hash: string) => void;
+  t: CatalogTranslateFn;
+  tr: TranslateFn;
+};
+
+export const buildCommitMenuActions = ({
+  repoPath,
+  node,
+  branches,
+  currentBranch,
+  layout,
+  reachableFromHead,
+  runGitAction,
+  setConfirmDialog,
+  setInputDialog,
+  setToast,
+  refreshCommits,
+  refreshWorkingTreeStatus,
+  onEditCommitMessage,
+  t,
+  tr,
+}: BuildCommitMenuActionsParams): MenuAction[] => [
+  ...buildCommitRefMenuActions({
+    node,
+    branches,
+    currentBranch,
+    runGitAction,
+    setConfirmDialog,
+    setInputDialog,
+    t,
+    tr,
+  }),
+  ...buildCommitHistoryMenuActions({
+    repoPath,
+    node,
+    layout,
+    reachableFromHead,
+    runGitAction,
+    setConfirmDialog,
+    setInputDialog,
+    setToast,
+    refreshCommits,
+    refreshWorkingTreeStatus,
+    tr,
+  }),
+  ...(onEditCommitMessage
+    ? [
+        {
+          label: tr('Commit-Nachricht bearbeiten …', 'Edit commit message …'),
+          description: tr('Öffnet den Editor, um die Nachricht dieses Commits zu ändern.', 'Opens the editor to change this commit message.'),
+          icon: '✎',
+          separator: true,
+          action: () => onEditCommitMessage(node.commit.hash),
+        },
+      ]
+    : []),
+];

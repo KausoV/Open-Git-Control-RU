@@ -1,0 +1,113 @@
+import { ReleaseSubmitLabel } from '@/components/release-creator/ReleaseSubmitLabel';
+import React from 'react';
+import type { GitHubCreateReleaseParamsDto, ReleaseSubmissionPhase } from '@/types/githubDtos';
+import { useI18n } from '@/i18n';
+import { Button, Panel, TextField, Toolbar } from '@/components/ui';
+import { validateGithubReleaseInput } from '@/utils/githubReleaseValidation';
+
+type ReleaseMiniFormProps = {
+  ownerRepo: { owner: string; repo: string } | null;
+  releaseForm: GitHubCreateReleaseParamsDto;
+  setReleaseForm: (updater: (prev: GitHubCreateReleaseParamsDto) => GitHubCreateReleaseParamsDto) => void;
+  releaseSubmitting: boolean;
+  releasePhase?: ReleaseSubmissionPhase;
+  releaseNotesGenerating: boolean;
+  onCreateRelease: () => Promise<void>;
+};
+
+export const ReleaseMiniForm: React.FC<ReleaseMiniFormProps> = ({
+  ownerRepo,
+  releaseForm,
+  setReleaseForm,
+  releaseSubmitting,
+  releasePhase,
+  releaseNotesGenerating,
+  onCreateRelease,
+}) => {
+  const { t } = useI18n();
+  const releaseValidation = validateGithubReleaseInput({
+    tagName: releaseForm.tagName || '',
+    releaseName: releaseForm.releaseName || '',
+  });
+  const formDisabled = !ownerRepo || releaseSubmitting || releaseNotesGenerating;
+  const releaseSubmitDisabled = formDisabled || !releaseValidation.valid;
+
+  return (
+    <Panel className="release-mini-form" disabled={!ownerRepo}>
+      <div className="release-mini-form__title">{t('generated.components.layout.sidebar.githubconnectedcontent.create_release_f0fffb84')}</div>
+      <TextField
+        type="text"
+        placeholder={t('generated.components.layout.sidebar.githubconnectedcontent.tag_name_required_f52acebf')}
+        value={releaseForm.tagName || ''}
+        onChange={(e) => setReleaseForm((prev) => ({ ...prev, tagName: e.target.value }))}
+        disabled={formDisabled}
+      />
+      <TextField
+        type="text"
+        placeholder={t('generated.components.layout.sidebar.githubconnectedcontent.release_name_required_cbead0c8')}
+        value={releaseForm.releaseName || ''}
+        onChange={(e) => setReleaseForm((prev) => ({ ...prev, releaseName: e.target.value }))}
+        disabled={formDisabled}
+      />
+      <TextField
+        type="text"
+        placeholder={t('generated.components.layout.sidebar.githubconnectedcontent.target_branch_or_commit_optional_3500df18')}
+        value={releaseForm.targetCommitish || ''}
+        onChange={(e) => setReleaseForm((prev) => ({ ...prev, targetCommitish: e.target.value }))}
+        disabled={formDisabled}
+      />
+      <TextField
+        as="textarea"
+        placeholder={t('generated.components.layout.sidebar.githubconnectedcontent.release_notes_optional_4d1c1433')}
+        value={releaseForm.body || ''}
+        onChange={(e) => setReleaseForm((prev) => ({ ...prev, body: e.target.value }))}
+        rows={3}
+        disabled={formDisabled}
+      />
+      <div className="release-mini-form__checks">
+        <label className="release-mini-form__check">
+          <input
+            type="checkbox"
+            checked={Boolean(releaseForm.draft)}
+            onChange={(e) => setReleaseForm((prev) => ({ ...prev, draft: e.target.checked }))}
+            disabled={formDisabled}
+          />
+          {t('generated.components.layout.sidebar.githubconnectedcontent.draft_03fcb5d9')}
+        </label>
+        <label className="release-mini-form__check">
+          <input
+            type="checkbox"
+            checked={Boolean(releaseForm.prerelease)}
+            onChange={(e) => setReleaseForm((prev) => ({ ...prev, prerelease: e.target.checked }))}
+            disabled={formDisabled}
+          />
+          {t('generated.components.layout.sidebar.githubconnectedcontent.pre_release_4bb763f1')}
+        </label>
+      </div>
+
+      {!releaseValidation.valid && (
+        <div className="release-mini-form__message release-mini-form__message--warning">
+          {!releaseForm.tagName.trim()
+            ? t('generated.components.layout.sidebar.githubconnectedcontent.tag_cannot_be_empty_70283101')
+            : releaseValidation.errors.tagName
+              ? t('generated.components.layout.sidebar.githubconnectedcontent.tag_contains_invalid_chars_whitespace_4fdbc358')
+              : releaseValidation.errors.releaseName === 'release.validation.nameRequired'
+                ? t('generated.components.layout.sidebar.githubconnectedcontent.release_name_must_not_be_empty_453809c9')
+                : t('generated.components.layout.sidebar.githubconnectedcontent.release_name_must_be_at_least_3_characters_d621812f')}
+        </div>
+      )}
+
+      <Toolbar align="end">
+        <Button
+          variant="primary"
+          onClick={() => {
+            void onCreateRelease();
+          }}
+          disabled={releaseSubmitDisabled}
+        >
+          <ReleaseSubmitLabel submitting={releaseSubmitting} phase={releasePhase} />
+        </Button>
+      </Toolbar>
+    </Panel>
+  );
+};

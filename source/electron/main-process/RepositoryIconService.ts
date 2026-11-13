@@ -1,0 +1,358 @@
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { writeTextFileAtomically, writeTextFileAtomicallyAsync } from './atomicFile';
+import { repositoryPathKey } from './activeRepositoryAuthorization';
+import { resolveExistingRepositoryPathWithoutSymlinks, normalizeRepositoryRelativePath } from '../git/RepositoryPathSafety';
+import { discoverRepositoryIcons, readRepositoryIconSource } from './repositoryIconDiscovery';
+import type { RepositoryIconCacheRequestDto, RepositoryIconChoiceDto, RepositoryIconStateDto } from '../../src/shared/repositoryIcons';
+import * as syncFs from 'node:fs';
+import { assertManagedPath, readStorageJson, readStorageJsonAsync } from './storageSafety';
+import { isStorageBusy, leaseStorage, recordCacheUse } from './managedStorage';
+import { canPersistAuxiliary, serializeAuxiliaryWrite } from './auxiliaryDiskBudget';
+import { mayReplaceCacheAsync } from './cacheReplacement';
+import { cacheFileIdentityAsync } from './cacheFileIdentity';
+
+function supportedIcon(value: unknown, repo: string): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const data = value as { version?: number; repoPath?: string; mode?: string };
+  return (
+    data.version === 1 &&
+    typeof data.repoPath === 'string' &&
+    path.isAbsolute(data.repoPath) &&
+    repositoryPathKey(data.repoPath) === repositoryPathKey(repo) &&
+    ['auto', 'manual', 'initials'].includes(data.mode || '')
+  );
+}
+
+type IconRecord = RepositoryIconStateDto & {
+  checkedAt: number;
+  scannedAt: number;
+  stamp: { bytes: number; mtimeMs: number } | null;
+  alive: boolean;
+  loaded: Promise<void>;
+};
+type Deps = { directory: string; storedPaths: () => string[]; validatePng: (dataUrl: string) => string; now?: () => number };
+export class RepositoryIconService {
+  private records = new Map<string, IconRecord>();
+  private listeners = new Set<(state: RepositoryIconStateDto) => void>();
+  private jobs: Array<() => Promise<void>> = [];
+  private running = 0;
+  private validations = new Map<IconRecord, Promise<void>>();
+  private readonly now: () => number;
+  constructor(private readonly deps: Deps) {
+    this.now = deps.now || Date.now;
+  }
+  subscribe(listener: (state: RepositoryIconStateDto) => void) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  private file(repo: string) {
+    return path.join(this.deps.directory, `${createHash('sha256').update(repositoryPathKey(repo)).digest('hex')}.json`);
+  }
+  private allowed(repo: string) {
+    if (typeof repo !== 'string' || !repo.trim() || !path.isAbsolute(repo)) throw new Error('An absolute saved repository path is required.');
+    const saved = this.deps.storedPaths().find((candidate) => repositoryPathKey(candidate) === repositoryPathKey(repo));
+    if (!saved) throw new Error('Repository logos are only available for saved repositories.');
+    return saved;
+  }
+  private current(record: IconRecord) {
+    this.allowed(record.repoPath);
+    if (!record.alive || this.records.get(repositoryPathKey(record.repoPath)) !== record) throw new Error('Repository logo context changed.');
+  }
+  private snapshot(record: IconRecord): RepositoryIconStateDto {
+    const { repoPath, mode, manualPath, selectionVersion, revision, thumbnail, candidates, limited, status, error } = record;
+    return {
+      repoPath,
+      mode,
+      manualPath,
+      selectionVersion,
+      revision,
+      thumbnail: thumbnail && { ...thumbnail },
+      candidates: [...candidates],
+      limited,
+      status,
+      error,
+    };
+  }
+  private changed(record: IconRecord) {
+    this.current(record);
+    record.revision++;
+    for (const listener of this.listeners) {
+      try {
+        listener(this.snapshot(record));
+      } catch {
+        /* A closed window cannot invalidate a successful update. */
+      }
+    }
+  }
+  private async persist(record: IconRecord) {
+    this.current(record);
+    const revision = record.revision;
+    const file = this.file(record.repoPath);
+    const release = leaseStorage(file);
+    let data = { version: 1, ...this.snapshot(record), stamp: record.stamp, scannedAt: record.scannedAt };
+    try {
+      await serializeAuxiliaryWrite(path.dirname(this.deps.directory), async () => {
+        this.current(record);
+        if (record.revision !== revision) return;
+        const identity = await cacheFileIdentityAsync(file);
+        if (!(await mayReplaceCacheAsync(this.deps.directory, file, (value) => supportedIcon(value, record.repoPath)))) return;
+        if (!(await canPersistAuxiliary(path.dirname(this.deps.directory), file, Buffer.byteLength(JSON.stringify(data))))) {
+          data = { ...data, thumbnail: null, candidates: [], stamp: null, scannedAt: 0 };
+          if (!(await canPersistAuxiliary(path.dirname(this.deps.directory), file, Buffer.byteLength(JSON.stringify(data)))))
+            throw new Error('Repository logo selection could not be saved because the storage cache limit is reached.');
+        }
+        this.current(record);
+        if (record.revision !== revision) return;
+        await writeTextFileAtomicallyAsync(file, JSON.stringify(data), this.deps.directory, async () => {
+          this.current(record);
+          return record.revision === revision && (await cacheFileIdentityAsync(file)) === identity;
+        });
+      });
+    } catch (error) {
+      if (record.alive && record.revision === revision) throw error;
+    } finally {
+      release();
+    }
+  }
+  private async record(repo: string) {
+    const repoPath = this.allowed(repo),
+      key = repositoryPathKey(repoPath);
+    let record = this.records.get(key);
+    if (!record) {
+      record = {
+        repoPath,
+        mode: 'auto',
+        manualPath: null,
+        selectionVersion: randomUUID(),
+        revision: 1,
+        thumbnail: null,
+        candidates: [],
+        limited: false,
+        status: 'ready',
+        error: null,
+        stamp: null,
+        checkedAt: -Infinity,
+        scannedAt: -Infinity,
+        alive: true,
+        loaded: Promise.resolve(),
+      };
+      this.records.set(key, record);
+      const loading = record;
+      loading.loaded = this.load(loading);
+    }
+    await record.loaded;
+    this.current(record);
+    return record;
+  }
+  private async load(record: IconRecord) {
+    try {
+      const file = this.file(record.repoPath);
+      const data = (await readStorageJsonAsync(this.deps.directory, file, 2 * 1024 * 1024)) as Record<string, any>;
+      this.current(record);
+      if (data.version !== 1 || repositoryPathKey(String(data.repoPath || '')) !== repositoryPathKey(record.repoPath)) return;
+      if (!['auto', 'manual', 'initials'].includes(data.mode)) return;
+      const manualPath = data.mode === 'manual' ? normalizeRepositoryRelativePath(data.manualPath) : null;
+      const thumbnail =
+        data.thumbnail && typeof data.thumbnail.path === 'string' && typeof data.thumbnail.version === 'string'
+          ? {
+              path: normalizeRepositoryRelativePath(data.thumbnail.path),
+              version: data.thumbnail.version,
+              dataUrl: this.deps.validatePng(data.thumbnail.dataUrl),
+            }
+          : null;
+      Object.assign(record, {
+        mode: data.mode,
+        manualPath,
+        thumbnail: data.mode === 'initials' ? null : thumbnail,
+        stamp: data.stamp || null,
+        candidates: Array.isArray(data.candidates)
+          ? data.candidates.filter((item: unknown) => typeof item === 'string').map((item: string) => normalizeRepositoryRelativePath(item))
+          : [],
+        selectionVersion: typeof data.selectionVersion === 'string' ? data.selectionVersion : randomUUID(),
+        revision: Number.isSafeInteger(data.revision) ? data.revision + 1 : 1,
+        scannedAt: Number.isFinite(data.scannedAt) ? data.scannedAt : -Infinity,
+        limited: Boolean(data.limited),
+      });
+    } catch {
+      /* Missing or corrupt cache starts with automatic discovery. */
+    }
+  }
+  async get(repo: string, rescan = false) {
+    const record = await this.record(repo);
+    recordCacheUse(this.file(record.repoPath), this.now());
+    if (rescan) await this.validate(record, true);
+    else if (record.mode !== 'initials' && this.now() - record.checkedAt >= 60_000) void this.validate(record, false);
+    return this.snapshot(record);
+  }
+  private drain() {
+    while (this.running < 2 && this.jobs.length) {
+      this.running++;
+      void this.jobs.shift()!().finally(() => {
+        this.running--;
+        this.drain();
+      });
+    }
+  }
+  private validate(record: IconRecord, force: boolean): Promise<void> {
+    const existing = this.validations.get(record);
+    if (existing) return force ? existing.then(() => this.validate(record, true)) : existing;
+    const release = leaseStorage(this.file(record.repoPath));
+    const promise = new Promise<void>((resolve) => {
+      this.jobs.push(async () => {
+        try {
+          await this.check(record, force);
+        } finally {
+          this.validations.delete(record);
+          release();
+          resolve();
+        }
+      });
+    });
+    this.validations.set(record, promise);
+    this.drain();
+    return promise;
+  }
+  private async check(record: IconRecord, force: boolean) {
+    const selectionVersion = record.selectionVersion;
+    try {
+      this.current(record);
+      record.status = 'scanning';
+      record.error = null;
+      this.changed(record);
+      if (!(await fs.stat(record.repoPath)).isDirectory()) throw new Error('Repository directory is unavailable.');
+      if (force || this.now() - record.scannedAt >= 300_000) {
+        const found = await discoverRepositoryIcons(record.repoPath);
+        this.current(record);
+        if (record.selectionVersion !== selectionVersion) return;
+        if (record.mode === 'auto' && record.thumbnail && JSON.stringify(record.candidates) !== JSON.stringify(found.candidates)) record.thumbnail = null;
+        record.candidates = found.candidates;
+        record.limited = found.limited;
+        record.scannedAt = this.now();
+      }
+      const source = record.mode === 'manual' ? record.manualPath : record.thumbnail?.path;
+      if (source) {
+        try {
+          const stat = await fs.stat(resolveExistingRepositoryPathWithoutSymlinks(record.repoPath, source));
+          this.current(record);
+          if (record.selectionVersion !== selectionVersion) return;
+          if (!stat.isFile() || stat.size !== record.stamp?.bytes || stat.mtimeMs !== record.stamp?.mtimeMs) record.thumbnail = null;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          this.current(record);
+          if (record.selectionVersion !== selectionVersion) return;
+          record.thumbnail = null;
+        }
+      }
+      // A newly discovered, higher-ranked candidate is considered by the renderer.
+      if (force && record.mode === 'auto') record.thumbnail = null;
+      record.status = 'ready';
+      record.error = null;
+      record.checkedAt = this.now();
+      this.changed(record);
+      await this.persist(record);
+    } catch (error) {
+      if (!record.alive || record.selectionVersion !== selectionVersion) return;
+      record.status = 'unavailable';
+      record.error = error instanceof Error ? error.message : String(error);
+      record.checkedAt = this.now();
+      try {
+        this.changed(record);
+      } catch {
+        /* Repository was removed during the check. */
+      }
+    }
+  }
+  async readSource(repo: string, relativePath: string) {
+    const record = await this.record(repo);
+    const source = await readRepositoryIconSource(record.repoPath, normalizeRepositoryRelativePath(relativePath));
+    this.current(record);
+    return source;
+  }
+  async choose(repo: string, choice: RepositoryIconChoiceDto) {
+    const record = await this.record(repo);
+    if (!(await mayReplaceCacheAsync(this.deps.directory, this.file(record.repoPath), (value) => supportedIcon(value, record.repoPath))))
+      throw new Error('The existing logo format is unsupported. Its data was preserved.');
+    if (!choice || !['auto', 'manual', 'initials'].includes(choice.mode)) throw new Error('Invalid repository logo selection.');
+    const manualPath = choice.mode === 'manual' ? normalizeRepositoryRelativePath(choice.path) : null;
+    if (manualPath) await this.readSource(repo, manualPath);
+    this.current(record);
+    if (record.selectionVersion !== choice.expectedSelectionVersion) throw new Error('Repository logo selection changed. Reopen the selection dialog.');
+    const previous = {
+      mode: record.mode,
+      manualPath: record.manualPath,
+      selectionVersion: record.selectionVersion,
+      thumbnail: record.thumbnail,
+      stamp: record.stamp,
+      checkedAt: record.checkedAt,
+      status: record.status,
+      error: record.error,
+    };
+    record.mode = choice.mode;
+    record.manualPath = manualPath;
+    record.selectionVersion = randomUUID();
+    const selectionVersion = record.selectionVersion;
+    record.thumbnail = null;
+    record.stamp = null;
+    record.checkedAt = -Infinity;
+    record.status = 'ready';
+    record.error = null;
+    try {
+      await this.persist(record);
+    } catch (error) {
+      if (record.selectionVersion === selectionVersion) Object.assign(record, previous);
+      throw error;
+    }
+    this.changed(record);
+    // The choice is already durable. A scan is optional background work and
+    // must not keep Save pending after other views have received the change.
+    return this.snapshot(record);
+  }
+  async cache(repo: string, request: RepositoryIconCacheRequestDto) {
+    const record = await this.record(repo);
+    const png = this.deps.validatePng(request.dataUrl);
+    const source = await this.readSource(repo, request.path);
+    this.current(record);
+    if (
+      request.expectedRevision !== record.revision ||
+      request.selectionVersion !== record.selectionVersion ||
+      request.sourceVersion !== source.version ||
+      record.mode === 'initials' ||
+      (record.mode === 'manual' ? record.manualPath !== request.path : !record.candidates.includes(request.path))
+    )
+      throw new Error('Repository logo changed while its preview was being generated.');
+    record.thumbnail = { path: source.path, version: source.version, dataUrl: png };
+    record.stamp = { mtimeMs: source.mtimeMs, bytes: source.bytes };
+    this.changed(record);
+    await this.persist(record);
+    return this.snapshot(record);
+  }
+  retainRepositories(paths: string[]) {
+    const retained = new Set(paths.map(repositoryPathKey));
+    for (const [key, record] of this.records)
+      if (!retained.has(key)) {
+        record.alive = false;
+        this.records.delete(key);
+      }
+    // Disk selections remain available throughout the centrally managed return period.
+  }
+  clearGenerated(repo: string): boolean {
+    const file = this.file(repo);
+    if (isStorageBusy(file)) return false;
+    const value = readStorageJson(this.deps.directory, file) as Record<string, unknown>;
+    if (value.version !== 1 || typeof value.repoPath !== 'string' || repositoryPathKey(value.repoPath) !== repositoryPathKey(repo)) return false;
+    assertManagedPath(this.deps.directory, file);
+    writeTextFileAtomically(file, JSON.stringify({ ...value, thumbnail: null, candidates: [], stamp: null, scannedAt: 0 }));
+    const record = this.records.get(repositoryPathKey(repo));
+    if (record) {
+      record.thumbnail = null;
+      record.candidates = [];
+      record.stamp = null;
+      record.scannedAt = -Infinity;
+      record.checkedAt = -Infinity;
+      this.changed(record);
+    }
+    return syncFs.existsSync(file);
+  }
+}

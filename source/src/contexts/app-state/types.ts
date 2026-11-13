@@ -1,0 +1,130 @@
+import type { Dispatch, PointerEvent as ReactPointerEvent, SetStateAction } from 'react';
+import type {
+  BranchContextMenuState,
+  CommitNavigationRequest,
+  ConfirmDialogState,
+  InputDialogState,
+  RepositoryStateContract,
+  RunGitCommandOptions,
+  SettingsStateContract,
+  SidebarCoreState,
+  WorkflowStateContract,
+} from '@/app/state/contracts';
+import type { GitMergeDirection, GitMergeMode } from '@/types/git';
+import type { RepositoryRunActionId } from '@/types/repositoryRun';
+import type { HostedRepositoryRef } from '@/types/hostingDtos';
+
+export type { CommitNavigationRequest } from '@/app/state/contracts';
+
+export type BaseUIContextValue = SidebarCoreState & {
+  onResetLayout: () => void;
+  isRunConfigOpen: boolean;
+  onOpenRunConfig: () => void;
+  onCloseRunConfig: () => void;
+  isSecretScanAllowlistOpen: boolean;
+  onOpenSecretScanAllowlist: () => void;
+  onCloseSecretScanAllowlist: () => void;
+  isRemoteConfigOpen: boolean;
+  onOpenRemoteConfig: () => void;
+  onOpenRepositoryAnalytics?: () => void;
+  onCloseRemoteConfig: () => void;
+  isReleaseCreatorOpen: boolean;
+  isRepositoryPublicationOpen?: boolean;
+  publicationConnectionId?: string;
+  onOpenRepositoryPublication?: (connectionId?: string) => void;
+  onCloseRepositoryPublication?: () => void;
+  releaseCreatorTarget: HostedRepositoryRef | null;
+  onOpenReleaseCreator: (target?: HostedRepositoryRef) => void;
+  onCloseReleaseCreator: () => void;
+};
+
+export type SettingsContextValue = SettingsStateContract;
+
+export type RepositoryContextValue = RepositoryStateContract & {
+  selectedCommit: string | null;
+  setSelectedCommit: (hash: string | null) => void;
+  commitNavigationRequest: CommitNavigationRequest | null;
+  onCommitNavigationRequestHandled: (requestId: number) => void;
+  onNavigateToCommit: (hash: string) => void;
+  refreshTrigger: number;
+  triggerRefresh: () => void;
+  commitRefreshTrigger: number;
+  triggerCommitRefresh: () => void;
+  onToast: (message: string, isError: boolean) => void;
+  showSecondaryHistory: boolean;
+  onMergeBranch: (branchName: string, mode: GitMergeMode, direction?: GitMergeDirection) => void;
+  onOpenRepoWorkspace: () => void;
+};
+
+export type WorkflowContextValue = WorkflowStateContract & {
+  activeGitActionLabel: string | null;
+  runGitCommand: (args: string[], successMsg: string, actionLabel?: string, options?: RunGitCommandOptions) => Promise<boolean>;
+  onFetch: () => void;
+  onPull: () => void;
+  onPullRebase: () => void;
+  onPullFfOnly: () => void;
+  onPullNoFf: () => void;
+  onPush: () => void;
+  onPushForceWithLease: () => void;
+  onPushSetUpstream: () => void;
+  autoOpenConflictResolverPath?: string | null;
+  onAutoOpenConflictResolverConsumed?: () => void;
+  onOpenConflictResolverForPath?: (path: string) => void;
+  onConflictMergeContinue: () => void;
+  onConflictMergeAbort: () => void;
+  onConflictRebaseContinue: () => void;
+  onConflictRebaseAbort: () => void;
+  onConflictCherryPickContinue: () => void;
+  onConflictCherryPickAbort: () => void;
+  onStartRepositoryRun: (action: RepositoryRunActionId) => Promise<boolean>;
+};
+
+export type UIContextValue = BaseUIContextValue & {
+  sidebarWidth: number;
+  isSidebarCollapsed: boolean;
+  isSidebarResizing: boolean;
+  onToggleSidebar: () => void;
+  onSidebarResizeStart: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  isCommandPaletteOpen: boolean;
+  setCommandPaletteOpen: (value: boolean) => void;
+  branchContextMenu: BranchContextMenuState;
+  setBranchContextMenu: (value: BranchContextMenuState) => void;
+  confirmDialog: ConfirmDialogState | null;
+  setConfirmDialog: Dispatch<SetStateAction<ConfirmDialogState | null>>;
+  inputDialog: InputDialogState | null;
+  setInputDialog: Dispatch<SetStateAction<InputDialogState | null>>;
+  closeConfirmDialog: () => void;
+  executeConfirmDialog: () => Promise<void>;
+  executeConfirmDialogSecondary: () => Promise<void>;
+  closeInputDialog: () => void;
+  executeInputDialog: (values: Record<string, string>) => Promise<void>;
+};
+
+export type AppStateSlicesValue = {
+  settings: SettingsContextValue;
+  repository: RepositoryContextValue;
+  workflow: WorkflowContextValue;
+  ui: UIContextValue;
+};
+
+export type AppStateUIState = Pick<
+  UIContextValue,
+  | 'sidebarWidth'
+  | 'isSidebarCollapsed'
+  | 'isSidebarResizing'
+  | 'onToggleSidebar'
+  | 'onSidebarResizeStart'
+  | 'isCommandPaletteOpen'
+  | 'setCommandPaletteOpen'
+  | 'branchContextMenu'
+  | 'setBranchContextMenu'
+  | 'confirmDialog'
+  | 'setConfirmDialog'
+  | 'inputDialog'
+  | 'setInputDialog'
+  | 'closeConfirmDialog'
+  | 'executeConfirmDialog'
+  | 'executeConfirmDialogSecondary'
+  | 'closeInputDialog'
+  | 'executeInputDialog'
+>;

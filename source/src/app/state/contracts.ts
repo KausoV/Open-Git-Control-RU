@@ -1,0 +1,176 @@
+import type { AppSettingsDto, RepoSortByDto } from '@/types/appDtos';
+import type { GitJobEventDto } from '@/types/aiDtos';
+import type { BranchInfo, GitSubmoduleInfo, RemoteSyncState } from '@/types/git';
+import type { RepositoryRunActionId, RepositoryRunConfigStateDto, RepositoryRunStateDto } from '@/types/repositoryRun';
+
+export type AppTabId = 'localRepos' | 'repo' | 'planner' | 'analytics' | 'hosting' | 'github' | 'settings';
+export type SettingsTabId = 'general' | 'shortcuts' | 'integrations' | 'api' | 'security' | 'system';
+export type SettingsUpdateResult = { success: true; settings: AppSettingsDto } | { success: false; error: string };
+export type GithubAuthHelpMethod = 'pat' | 'device' | 'web' | null;
+
+export type RepoMetaMap = Record<string, { lastOpened: number; pinned: boolean; createdAt: number }>;
+
+export type RemoteStatus = {
+  title: string;
+  detail: string;
+  color: string;
+  backgroundColor: string;
+  borderColor: string;
+};
+
+export type BranchContextMenuState = { x: number; y: number; branch: string; isHead: boolean; isProtected?: boolean } | null;
+
+export interface DialogContextItem {
+  label: string;
+  value: string;
+}
+
+export interface InputDialogOption {
+  value: string;
+  label: string;
+  disabled?: boolean;
+}
+
+export interface InputDialogField {
+  id: string;
+  label: string;
+  placeholder?: string;
+  defaultValue?: string;
+  required?: boolean;
+  helperText?: string;
+  multiline?: boolean;
+  rows?: number;
+  type?: 'text' | 'url' | 'checkbox' | 'select' | 'folder-tree';
+  options?: InputDialogOption[];
+  loadChildren?: (parentValue: string) => Promise<InputDialogOption[]>;
+  visible?: (values: Record<string, string>) => boolean;
+  validate?: (value: string, values: Record<string, string>) => string | null;
+}
+
+export type ConfirmDialogState = {
+  contextAction?: { label: string; onClick: () => void };
+  variant: 'confirm' | 'danger';
+  title: string;
+  message: string;
+  contextItems: DialogContextItem[];
+  irreversible: boolean;
+  consequences: string;
+  confirmLabel?: string;
+  focusConfirm?: boolean;
+  onConfirm: () => Promise<void> | void;
+  onCancel?: () => Promise<void> | void;
+  secondaryActionLabel?: string;
+  secondaryActionVariant?: 'default' | 'danger';
+  onSecondaryAction?: () => Promise<void> | void;
+};
+
+export type InputDialogState = {
+  title: string;
+  message: string;
+  fields: InputDialogField[];
+  contextItems: DialogContextItem[];
+  irreversible: boolean;
+  consequences: string;
+  confirmLabel?: string;
+  onSubmit: (values: Record<string, string>) => Promise<void> | void;
+};
+
+export type RunGitCommandOptions = {
+  /** Repository captured when an asynchronous workflow/dialog was opened. */
+  expectedRepoPath?: string;
+  skipDirtyGuard?: boolean;
+  skipRemoteAheadDirtyGuard?: boolean;
+  skipSecretScan?: boolean;
+  skipAutoSetUpstreamOnPushFailure?: boolean;
+  skipGithubRecoveryOnPushFailure?: boolean;
+  skipAutoInitialCommitOnPushFailure?: boolean;
+  skipSyncMismatchRecovery?: boolean;
+  confirmedAutoInitialCommit?: boolean;
+};
+
+export type CommitNavigationRequest = {
+  hash: string;
+  requestId: number;
+};
+
+export type SidebarCoreState = {
+  activeTab: AppTabId;
+  setActiveTab: (tab: AppTabId) => void;
+  isRepoPanelCollapsed: boolean;
+  onToggleRepoPanelCollapsed: () => void;
+  isBranchPanelCollapsed: boolean;
+  onToggleBranchPanelCollapsed: () => void;
+  isTagPanelCollapsed: boolean;
+  onToggleTagPanelCollapsed: () => void;
+  isRemotePanelCollapsed: boolean;
+  onToggleRemotePanelCollapsed: () => void;
+  isSubmodulePanelCollapsed: boolean;
+  onToggleSubmodulePanelCollapsed: () => void;
+};
+
+export type SettingsStateContract = {
+  settings: AppSettingsDto;
+  onUpdateSettings: (partial: Partial<AppSettingsDto>) => Promise<SettingsUpdateResult>;
+  settingsTab: SettingsTabId;
+  onSelectSettingsTab: (tab: SettingsTabId) => void;
+};
+
+export type RepositoryStateContract = {
+  activeRepo: string | null;
+  openRepos: string[];
+  isRestoringRepos: boolean;
+  repoMeta: RepoMetaMap;
+  repoSortBy: RepoSortByDto;
+  onSetRepoSortBy: (sortBy: RepoSortByDto) => void;
+  onToggleRepoPin: (repoPath: string) => void;
+  onSetRepoPins: (repoPaths: string[], pinned: boolean) => void;
+  onOpenFolder: () => void;
+  onCloneByUrl: () => void;
+  onSwitchRepo: (repoPath: string) => Promise<boolean>;
+  onAddRepo: (repoPath: string) => Promise<boolean>;
+  onCloseRepo: (repoPath: string) => void;
+  remoteSync: RemoteSyncState;
+  onRefreshRemoteQuick: () => void;
+  branches: BranchInfo[];
+  currentBranch: string;
+  isCreatingBranch: boolean;
+  onSetCreatingBranch: (value: boolean) => void;
+  onCreateBranch: (branchName: string) => void;
+  onCheckoutBranch: (name: string) => void;
+  onSetBranchContextMenu: (value: BranchContextMenuState) => void;
+  tags: string[];
+  tagConflicts: string[];
+  onCreateTag: () => void;
+  onPushTags: () => void;
+  onDeleteTag: (name: string) => void;
+  onSelectTag: (name: string) => void;
+  remotes: { name: string; url: string }[];
+  remoteStatus: RemoteStatus;
+  onAddRemote: () => void;
+  onRemoveRemote: (name: string) => void;
+  onRenameRemote: (name: string) => void;
+  onSetRemoteUrl: (name: string, currentUrl: string) => void;
+  onRefreshRemote: () => void;
+  onSetUpstreamForCurrentBranch: () => void;
+  submodules: GitSubmoduleInfo[];
+  onSubmoduleInitUpdate: () => void;
+  onSubmoduleSync: () => void;
+  onOpenSubmodule: (submodulePath: string) => void;
+  hasRemoteOrigin: boolean | null;
+};
+
+export type WorkflowStateContract = {
+  isGitActionRunning: boolean;
+  onPushTags: () => void;
+  jobs: GitJobEventDto[];
+  onClearJobs: () => void;
+  repositoryRun: RepositoryRunStateDto | null;
+  activeRunConfig: RepositoryRunConfigStateDto | null;
+  isRunConsoleOpen: boolean;
+  hasUnreadRepositoryRunResult: boolean;
+  onStartRepositoryRun: (action: RepositoryRunActionId) => Promise<boolean>;
+  onStopRepositoryRun: () => Promise<boolean>;
+  onOpenRunConsole: () => void;
+  onCloseRunConsole: () => void;
+  onRefreshRunConfig: () => Promise<void>;
+};

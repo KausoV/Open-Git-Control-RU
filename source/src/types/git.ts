@@ -1,0 +1,86 @@
+export type GitMergeMode = 'default' | 'noFf' | 'squash' | 'ffOnly';
+export type GitMergeDirection = 'intoCurrent' | 'intoSelected';
+
+export type BranchInfo = {
+  name: string;
+  isHead: boolean;
+  scope: 'local' | 'remote';
+  isProtected?: boolean;
+};
+
+export type RemoteSyncState = {
+  isFetching: boolean;
+  lastFetchedAt: number | null;
+  lastFetchError: string | null;
+  ahead: number;
+  behind: number;
+  hasUpstream: boolean;
+};
+
+export type RemoteInfo = {
+  name: string;
+  url: string;
+};
+
+export type RepoOwnerRef = {
+  owner: string;
+  repo: string;
+  /** Origin owner for a fork when PRs are managed on the upstream repository. */
+  headOwner?: string;
+  headRepo?: string;
+  defaultBranch?: string;
+};
+
+export type ToastMessage = {
+  msg: string;
+  isError: boolean;
+};
+
+export type GitFileHistoryEntryDto = {
+  hash: string;
+  abbrevHash: string;
+  author: string;
+  date: string;
+  subject: string;
+  /** Repository-relative path at this commit, including the destination of a rename. */
+  path?: string;
+};
+
+export type GitFileBlameLineDto = {
+  lineNumber: number;
+  commitHash: string;
+  abbrevHash: string;
+  author: string;
+  authorTime: string;
+  summary: string;
+  content: string;
+};
+
+export type ForensicSearchTypeDto = 'string' | 'regex' | 'line';
+
+export type ForensicHistoryQueryDto = {
+  type: ForensicSearchTypeDto;
+  path: string;
+  value?: string;
+  startLine?: number;
+  endLine?: number;
+  limit?: number;
+};
+
+export type GitSubmoduleStateCode = 'clean' | 'uninitialized' | 'dirty' | 'conflicted' | 'unknown';
+
+export type GitSubmoduleInfo = {
+  path: string;
+  commit: string;
+  stateCode: GitSubmoduleStateCode;
+  isDirty: boolean;
+  summary: string | null;
+};
+
+export type GitReflogEntryDto = {
+  hash: string;
+  abbrevHash: string;
+  selector: string;
+  subject: string;
+  date: string;
+};

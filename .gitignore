@@ -1,0 +1,82 @@
+# Only public project material is allowed at the repository root.
+/*
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/BUILDING.md
+!/CHANGELOG.md
+!/LICENSE
+!/Start-Open-Git-Control-RU.cmd
+!/source/
+!/translation/
+!/scripts/
+
+# Publish only the portable, machine-independent public build entrypoint.
+/scripts/*
+!/scripts/Build-Public.ps1
+!/scripts/package-public-release.ps1
+
+# Build output and downloaded dependencies at any depth.
+node_modules/
+dist/
+dist-ssr/
+dist-electron/
+coverage/
+release/
+target/
+.cargo-home/
+.cache/
+.npm/
+build-cache/
+build-runtime/
+*.tsbuildinfo
+*.log
+*.local
+
+# Local profiles, automation metadata, logs and verification artifacts.
+user-data/
+profiles/
+logs/
+verification/
+.codex/
+.claude/
+.agents/
+.roadmap/
+roadmap*.json
+sync-roadmap.ps1
+verification*.json
+launch-check.*
+
+# Credentials, local environment and editor metadata.
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+*.sqlite
+*.sqlite3
+*.db
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.swp
+*.swo
+
+# Compiled binaries and downloaded archives are release assets, not source.
+*.exe
+*.dll
+*.pdb
+*.msi
+*.asar
+*.zip
+*.7z
+*.tar
+*.gz
+*.dmg
+*.AppImage
+*.deb
+
+# source/.gitignore also excludes generated build resources and Recovery notices.
+# Keep package-lock.json, Cargo.lock, .cargo/config.toml, logos and translation JSON.

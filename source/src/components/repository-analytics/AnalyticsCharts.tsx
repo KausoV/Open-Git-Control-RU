@@ -1,0 +1,253 @@
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { useI18n } from '@/i18n';
+import type { AnalyticsFilters, AnalyticsPeriod, RepositoryAnalyticsSnapshot } from '@/shared/ipc/repositoryAnalytics';
+
+export const count = (value: number) => value.toLocaleString();
+const percentageFormats = new Map<string | undefined, Intl.NumberFormat>();
+export function percent(value: number, locale?: string) {
+  let format = percentageFormats.get(locale);
+  if (!format) {
+    format = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 });
+    percentageFormats.set(locale, format);
+  }
+  return `${format.format(100 * value)}%`;
+}
+export const percentWidth = (value: number) => `${100 * Math.max(0, Math.min(1, value))}%`;
+export const dateLabel = (date: number) => (date ? new Date(date).toLocaleDateString() : '—');
+export function AnalyticsTable({
+  headings,
+  children,
+  caption,
+  scrollLabel,
+}: {
+  headings: string[];
+  children: React.ReactNode;
+  caption?: string;
+  scrollLabel?: string;
+}) {
+  return (
+    <div className="analytics-table-wrap" tabIndex={scrollLabel ? 0 : undefined} role={scrollLabel ? 'region' : undefined} aria-label={scrollLabel}>
+      <table className="analytics-table">
+        {caption && <caption>{caption}</caption>}
+        <thead>
+          <tr>
+            {headings.map((heading) => (
+              <th key={heading} scope="col">
+                {heading}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>{children}</tbody>
+      </table>
+    </div>
+  );
+}
+export function AnalyticsEmpty({ children }: { children: React.ReactNode }) {
+  return <p className="analytics-empty">{children}</p>;
+}
+export function moveChartFocus(event: React.KeyboardEvent<HTMLButtonElement>, verticalStride = 1, horizontalStride = 1) {
+  if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+  const buttons = [...event.currentTarget.parentElement!.querySelectorAll<HTMLButtonElement>('button')];
+  const index = buttons.indexOf(event.currentTarget);
+  const stride = ['ArrowUp', 'ArrowDown'].includes(event.key) ? verticalStride : horizontalStride;
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : index + (['ArrowLeft', 'ArrowUp'].includes(event.key) ? -stride : stride);
+  buttons[Math.max(0, Math.min(buttons.length - 1, next))]?.focus();
+  event.preventDefault();
+}
+export function periodInterval(snapshot: Pick<RepositoryAnalyticsSnapshot, 'filters' | 'totals'>): Exclude<AnalyticsFilters['aggregation'], 'auto'> {
+  if (snapshot.filters.aggregation !== 'auto') return snapshot.filters.aggregation;
+  const span = snapshot.totals.lastActivity - snapshot.totals.firstActivity;
+  return span > 365 * 86400000 ? 'month' : span > 90 * 86400000 ? 'week' : 'day';
+}
+export function periodOrdinal(date: string, interval: 'day' | 'week' | 'month') {
+  if (interval === 'month') return Number(date.slice(0, 4)) * 12 + Number(date.slice(5, 7)) - 1;
+  return Date.parse(`${date}T00:00:00Z`) / (86400000 * (interval === 'week' ? 7 : 1));
+}
+export function PeriodDateAxis({
+  start,
+  columns,
+  interval,
+  fit = false,
+}: {
+  start: string;
+  columns: number;
+  interval: 'day' | 'week' | 'month';
+  fit?: boolean;
+}) {
+  const { locale } = useI18n();
+  const axisRef = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(800);
+  useEffect(() => {
+    const axis = axisRef.current!;
+    const measure = () => {
+      if (axis.clientWidth) setWidth(axis.clientWidth);
+    };
+    measure();
+    if (typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(measure);
+      observer.observe(axis);
+      return () => observer.disconnect();
+    }
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, []);
+  const compact = fit && width < 400;
+  const ticks = Math.min(columns, Math.max(2, Math.min(12, Math.floor(width / (compact ? 80 : 100)))));
+  const formatter = new Intl.DateTimeFormat(locale, {
+    month: interval === 'month' ? 'short' : '2-digit',
+    ...(interval === 'month' ? {} : { day: '2-digit' as const }),
+    year: compact ? '2-digit' : 'numeric',
+    timeZone: 'UTC',
+  });
+  return (
+    <div ref={axisRef} className="analytics-period-axis" aria-hidden="true">
+      {Array.from({ length: ticks }, (_, index) => {
+        const column = ticks === 1 ? 0 : Math.round((index * (columns - 1)) / (ticks - 1));
+        const date = new Date(`${start}T00:00:00Z`);
+        if (interval === 'month') date.setUTCMonth(date.getUTCMonth() + column);
+        else date.setUTCDate(date.getUTCDate() + column * (interval === 'week' ? 7 : 1));
+        return (
+          <span
+            key={column}
+            data-date={date.toISOString().slice(0, 10)}
+            className={ticks > 1 || fit ? (index === 0 ? 'is-first' : index === ticks - 1 ? 'is-last' : undefined) : undefined}
+            style={{ left: fit && ticks === 1 ? '0%' : `${((column + 0.5) / columns) * 100}%` }}
+          >
+            <span>{formatter.format(date)}</span>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+export function PeriodChart({
+  periods,
+  interval = 'day',
+  onSelect,
+}: {
+  periods: AnalyticsPeriod[];
+  interval?: 'day' | 'week' | 'month';
+  onSelect: (date: string) => void;
+}) {
+  const { tr } = useI18n();
+  const max = Math.max(1, ...periods.map((period) => period.commits));
+  if (!periods.length) return <AnalyticsEmpty>{tr('Keine Aktivität im gewählten Zeitraum.', 'No activity in the selected period.')}</AnalyticsEmpty>;
+  const first = periodOrdinal(periods[0].date, interval);
+  const columns = Math.round(periodOrdinal(periods[periods.length - 1].date, interval) - first) + 1;
+  const columnWidth = Math.max(28, count(max).length * 7 + 8);
+  return (
+    <>
+      <div className="analytics-chart" aria-label={tr('Beiträge über Zeit', 'Contributions over time')}>
+        <div className="analytics-period-plot" style={{ minWidth: `${columns * columnWidth}px` }}>
+          <div className="analytics-bars analytics-bars--activity" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}>
+            {periods.map((period, index) => {
+              const gap = index ? Math.max(0, Math.round(periodOrdinal(period.date, interval) - periodOrdinal(periods[index - 1].date, interval)) - 1) : 0;
+              return (
+                <Fragment key={period.date}>
+                  {gap > 0 && (
+                    <span
+                      aria-hidden="true"
+                      className="analytics-period-gap"
+                      style={{ gridColumn: `${Math.round(periodOrdinal(period.date, interval) - first) - gap + 1} / span ${gap}` }}
+                    />
+                  )}
+                  <button
+                    key={period.date}
+                    className="analytics-bar"
+                    style={{ gridColumn: Math.round(periodOrdinal(period.date, interval) - first) + 1 }}
+                    onClick={() => onSelect(period.date)}
+                    onKeyDown={moveChartFocus}
+                    title={`${period.date} · ${count(period.commits)} commits · +${count(period.additions)} / −${count(period.deletions)}`}
+                    aria-label={`${period.date}: ${count(period.commits)} commits, +${count(period.additions)}, −${count(period.deletions)}`}
+                  >
+                    <span className="analytics-bar-activity" style={{ height: `${Math.max(1, (period.commits / max) * 80)}%` }}>
+                      <span className="analytics-bar-value" aria-hidden="true">
+                        {count(period.commits)}
+                      </span>
+                    </span>
+                  </button>
+                </Fragment>
+              );
+            })}
+          </div>
+          <PeriodDateAxis start={periods[0].date} columns={columns} interval={interval} />
+        </div>
+      </div>
+    </>
+  );
+}
+const localDay = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+export function ActivityCalendar({ periods, onSelect }: { periods: AnalyticsPeriod[]; onSelect: (date: string) => void }) {
+  const { tr, locale } = useI18n();
+  const years = [...new Set(periods.map((period) => Number(period.date.slice(0, 4))))].sort((a, b) => b - a);
+  const [selected, setSelected] = useState(0);
+  const year = years.includes(selected) ? selected : (years[0] ?? new Date().getFullYear());
+  const days = useMemo(() => {
+    const rows: { date: string; commits: number }[] = [];
+    const map = new Map(periods.map((period) => [period.date, period.commits]));
+    for (const date = new Date(year, 0, 1); date.getFullYear() === year; date.setDate(date.getDate() + 1))
+      rows.push({ date: localDay(date), commits: map.get(localDay(date)) ?? 0 });
+    return rows;
+  }, [periods, year]);
+  const max = Math.max(1, ...days.map((day) => day.commits));
+  const startOffset = (new Date(year, 0, 1).getDay() + 6) % 7;
+  const weeks = Math.ceil((startOffset + days.length) / 7);
+  const columns = { gridTemplateColumns: `repeat(${weeks}, minmax(0, 1fr))` };
+  const monthFormat = new Intl.DateTimeFormat(locale, { month: 'short' });
+  const weekdayFormat = new Intl.DateTimeFormat(locale, { weekday: 'short' });
+  return (
+    <>
+      <div className="analytics-section-toolbar">
+        <h3>{tr('Aktivitätskalender', 'Activity calendar')}</h3>
+        <label>
+          {tr('Jahr', 'Year')}{' '}
+          <select className="ui-field" value={year} onChange={(event) => setSelected(Number(event.target.value))}>
+            {(years.length ? years : [year]).map((value) => (
+              <option key={value}>{value}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div className="analytics-calendar-scroll">
+        <div className="analytics-calendar-plot" style={{ minWidth: `${weeks * 11 + (weeks - 1) * 3 + 34}px` }}>
+          <div className="analytics-calendar-months" style={columns} aria-hidden="true">
+            {Array.from({ length: 12 }, (_, month) => {
+              const date = new Date(year, month, 1);
+              const index = days.findIndex((day) => day.date === localDay(date));
+              return (
+                <span key={month} style={{ gridColumn: Math.floor((startOffset + index) / 7) + 1 }}>
+                  {monthFormat.format(date)}
+                </span>
+              );
+            })}
+          </div>
+          <div className="analytics-calendar-body">
+            <div className="analytics-calendar-weekdays" aria-hidden="true">
+              {Array.from({ length: 7 }, (_, day) => (
+                <span key={day}>{day % 2 === 0 && day < 6 ? weekdayFormat.format(new Date(year, 0, 1 - startOffset + day)) : ''}</span>
+              ))}
+            </div>
+            <div className="analytics-calendar" style={columns} aria-label={`${tr('Aktivität', 'Activity')} ${year}`}>
+              {days.map((day, index) => (
+                <button
+                  key={day.date}
+                  className={`analytics-day analytics-day--${day.commits ? Math.max(1, Math.ceil((day.commits / max) * 4)) : 0}`}
+                  style={{ gridRow: ((startOffset + index) % 7) + 1, gridColumn: Math.floor((startOffset + index) / 7) + 1 }}
+                  onKeyDown={(event) => moveChartFocus(event, 1, 7)}
+                  onClick={() => onSelect(day.date)}
+                  title={`${day.date}: ${count(day.commits)} commits`}
+                  aria-label={`${day.date}: ${count(day.commits)} commits`}
+                />
+              ))}
+            </div>
+          </div>
+          <div className="analytics-axis analytics-calendar-axis">
+            <span>{new Date(year, 0, 1).toLocaleDateString(locale)}</span>
+            <span>{new Date(year, 11, 31).toLocaleDateString(locale)}</span>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}

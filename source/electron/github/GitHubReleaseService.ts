@@ -1,0 +1,196 @@
+import * as fs from 'fs';
+import * as path from 'path';
+import { DEFAULT_HOST } from './types';
+import type { CreateReleaseParams, GithubApiErrorLike, GitHubOctokitProvider, GitHubReleaseDto, RepositoryReleaseApi, RepositoryTagApi } from './types';
+
+export type UploadReleaseAssetParams = {
+  owner: string;
+  repo: string;
+  releaseId: number;
+  filePath: string;
+  name?: string;
+};
+
+/**
+ * Release assets are uploaded to a dedicated upload host. Octokit hard-codes
+ * `https://uploads.github.com` for this endpoint, which would leak an
+ * Enterprise token and file to public GitHub. Derive the correct upload host
+ * from the configured GitHub host instead.
+ */
+export function uploadBaseUrlForHost(host: string): string {
+  const normalizedHost = String(host || '')
+    .trim()
+    .toLowerCase();
+  if (!normalizedHost || normalizedHost === DEFAULT_HOST) {
+    return 'https://uploads.github.com';
+  }
+  return `https://${normalizedHost}/api/uploads`;
+}
+
+export class GitHubReleaseService {
+  constructor(
+    private readonly getOctokit: GitHubOctokitProvider,
+    private readonly getHost: () => string = () => DEFAULT_HOST,
+  ) {}
+
+  async listRepositoryTags(owner: string, repo: string, perPage: number = 200): Promise<string[]> {
+    const octokit = this.getOctokit();
+    const safePerPage = Number.isFinite(perPage) ? Math.max(1, Math.min(Math.floor(perPage), 300)) : 200;
+
+    const tags: string[] = [];
+    let page = 1;
+
+    while (tags.length < safePerPage) {
+      const remaining = safePerPage - tags.length;
+      const { data } = await octokit.rest.repos.listTags({
+        owner,
+        repo,
+        per_page: Math.min(100, remaining),
+        page,
+      });
+
+      const pageTags = ((data || []) as RepositoryTagApi[]).map((tag) => String(tag?.name || '').trim()).filter(Boolean);
+
+      tags.push(...pageTags);
+      if (!data || data.length < 100) break;
+      page += 1;
+    }
+
+    return [...new Set(tags)];
+  }
+
+  async getLatestReleaseTag(owner: string, repo: string): Promise<string | null> {
+    const octokit = this.getOctokit();
+    const { data } = await octokit.rest.repos.listReleases({
+      owner,
+      repo,
+      per_page: 30,
+      page: 1,
+    });
+
+    const first = ((data || []) as RepositoryReleaseApi[]).find((release) => Boolean(String(release?.tag_name || '').trim()));
+    if (!first) return null;
+    const tag = String(first.tag_name || '').trim();
+    return tag || null;
+  }
+
+  async createRelease(params: CreateReleaseParams): Promise<GitHubReleaseDto> {
+    const octokit = this.getOctokit();
+    const owner = (params.owner || '').trim();
+    const repo = (params.repo || '').trim();
+    const tagName = (params.tagName || '').trim();
+    const releaseName = (params.releaseName || '').trim();
+    const targetCommitish = (params.targetCommitish || '').trim();
+
+    if (!owner || !repo) {
+      throw new Error('Owner und Repository sind erforderlich.');
+    }
+
+    if (!tagName) {
+      throw new Error('Tag-Name ist erforderlich.');
+    }
+
+    if (!releaseName) {
+      throw new Error('Release-Name ist erforderlich.');
+    }
+
+    try {
+      const { data } = await octokit.rest.repos.createRelease({
+        owner,
+        repo,
+        tag_name: tagName,
+        name: releaseName,
+        body: params.body || '',
+        draft: Boolean(params.draft),
+        prerelease: Boolean(params.prerelease),
+        ...(targetCommitish ? { target_commitish: targetCommitish } : {}),
+      });
+
+      return {
+        id: data.id,
+        tagName: data.tag_name,
+        name: data.name || releaseName,
+        htmlUrl: data.html_url,
+        draft: Boolean(data.draft),
+        prerelease: Boolean(data.prerelease),
+        publishedAt: data.published_at || null,
+      };
+    } catch (error: unknown) {
+      const apiError = error as GithubApiErrorLike;
+      const status = Number(apiError?.status);
+      const apiMessage = typeof apiError?.response?.data?.message === 'string' ? apiError.response.data.message : '';
+      const fallbackMessage = typeof apiError?.message === 'string' ? apiError.message : '';
+      const normalizedMessage = `${fallbackMessage} ${apiMessage}`.toLowerCase();
+
+      if (status === 422 && normalizedMessage.includes('already_exists')) {
+        throw new Error('Tag existiert bereits. Bitte anderen Tag waehlen oder bestehenden Tag verwenden.');
+      }
+
+      if (status === 422 && normalizedMessage.includes('target_commitish')) {
+        throw new Error('Ungueltiger targetCommitish. Bitte Branch-Name oder Commit-SHA pruefen.');
+      }
+
+      if (status === 403 || status === 404) {
+        throw new Error('Keine Berechtigung fuer dieses Repository. Bitte Token-Rechte pruefen.');
+      }
+
+      throw new Error(apiMessage || fallbackMessage || 'Release konnte nicht erstellt werden.');
+    }
+  }
+
+  async resolvePublishedCommit(owner: string, repo: string, ref: string, signal: AbortSignal): Promise<string | null> {
+    try {
+      const { data } = await this.getOctokit().rest.repos.getCommit({ owner, repo, ref, request: { signal } });
+      return data.sha;
+    } catch (error) {
+      if ((error as GithubApiErrorLike)?.status === 404) return null;
+      throw error;
+    }
+  }
+
+  async uploadReleaseAsset(params: UploadReleaseAssetParams): Promise<{ id: number; name: string; browserDownloadUrl: string }> {
+    const octokit = this.getOctokit();
+    const owner = (params.owner || '').trim();
+    const repo = (params.repo || '').trim();
+    const filePath = (params.filePath || '').trim();
+    const releaseId = Number(params.releaseId);
+    const assetName = (params.name || path.basename(filePath) || '').trim();
+
+    if (!owner || !repo) {
+      throw new Error('RELEASE_ASSET_OWNER_REPOSITORY_REQUIRED');
+    }
+    if (!Number.isFinite(releaseId) || releaseId <= 0) {
+      throw new Error('RELEASE_ASSET_RELEASE_ID_REQUIRED');
+    }
+    if (!filePath) {
+      throw new Error('RELEASE_ASSET_FILE_PATH_REQUIRED');
+    }
+    if (!assetName) {
+      throw new Error('RELEASE_ASSET_NAME_REQUIRED');
+    }
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+      throw new Error('RELEASE_ASSET_FILE_NOT_FOUND');
+    }
+
+    const { data } = await octokit.rest.repos.uploadReleaseAsset({
+      owner,
+      repo,
+      release_id: releaseId,
+      name: assetName,
+      data: fs.createReadStream(filePath) as unknown as string,
+      // Override Octokit's hard-coded uploads.github.com so Enterprise tokens
+      // and files are sent to the configured GHES upload host, not public GitHub.
+      baseUrl: uploadBaseUrlForHost(this.getHost()),
+      headers: {
+        'content-type': 'application/octet-stream',
+        'content-length': fs.statSync(filePath).size,
+      },
+    });
+
+    return {
+      id: data.id,
+      name: data.name,
+      browserDownloadUrl: data.browser_download_url,
+    };
+  }
+}

@@ -1,0 +1,39 @@
+import { create } from 'zustand';
+import type { PullMode } from '@/types/remoteTransfers';
+
+export type RemoteTransferDialog = {
+  repoPath: string;
+  requestId?: string;
+  mode: 'remotes' | 'push' | 'pull' | 'fetch';
+  force?: boolean;
+  pullMode?: PullMode;
+  autostash?: boolean;
+  destinationBranch?: string;
+  sourceBranch?: string;
+  branchTargets?: Array<{ sourceBranch: string; destinationBranch: string; sourceOid: string }>;
+  expectedTagRefs?: Array<{ name: string; oid: string }>;
+  expectedBranch?: string;
+  expectedSourceOid?: string;
+  constrainedRemoteNames?: string[];
+  constrainedTargetUrls?: Record<string, string[]>;
+  tagNames?: string[];
+  selectTags?: boolean;
+};
+export const useRemoteTransferDialogState = create<{
+  dialog: RemoteTransferDialog | null;
+  cancelledRequest: string | null;
+  cancelRequest: (id: string | null) => void;
+  open: (dialog: RemoteTransferDialog) => void;
+  close: () => void;
+}>((set) => ({
+  dialog: null,
+  cancelledRequest: null,
+  cancelRequest: (cancelledRequest) => set((state) => ({ cancelledRequest, ...(state.dialog?.requestId === cancelledRequest ? { dialog: null } : {}) })),
+  open: (dialog) => set({ dialog }),
+  close: () => set({ dialog: null }),
+}));
+
+export const openRemoteTransferDialog = (dialog: RemoteTransferDialog) => useRemoteTransferDialogState.getState().open(dialog);
+
+/** Every interactive transfer enters the same coordinator; this is not a forced dialog. */
+export const requestRemoteTransfer = openRemoteTransferDialog;

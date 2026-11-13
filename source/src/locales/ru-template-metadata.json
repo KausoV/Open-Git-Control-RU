@@ -1,0 +1,32 @@
+{
+  "Remote is ahead by {{0}} commit{{1}}": [
+    1
+  ],
+  "Local is ahead by {{0}} commit{{1}}": [
+    1
+  ],
+  "Remote is ahead by {{0}} commit{{1}} and local changes are still uncommitted. A regular push is often rejected with a non-fast-forward error.": [
+    1
+  ],
+  "Remote is ahead by {{0}} commit{{1}} and local changes are still uncommitted. Pull may fail or create conflicts in this state.": [
+    1
+  ],
+  "{{0}} file{{1}} uncommitted": [
+    1
+  ],
+  "{{0}} file{{1}} affected": [
+    1
+  ],
+  "Repository and {{0}} planning item{{1}} removed: {{2}}": [
+    1
+  ],
+  "{{0}} unresolved block{{1}}": [
+    1
+  ],
+  " - {{0}} block{{1}}": [
+    1
+  ],
+  "{{0}} file{{1}}": [
+    1
+  ]
+}

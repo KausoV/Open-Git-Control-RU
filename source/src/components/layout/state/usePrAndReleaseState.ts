@@ -1,0 +1,70 @@
+import { useState } from 'react';
+import type { GitHubCreateReleaseParamsDto, GitHubReleaseContextDto, GitHubReleaseDto } from '@/types/githubDtos';
+import type { ReleaseNotesOptions } from '@/types/releaseNotes';
+import { DEFAULT_RELEASE_NOTES_OPTIONS } from '@/types/releaseNotes';
+
+export const usePrAndReleaseState = () => {
+  const [showCreatePR, setShowCreatePR] = useState(false);
+  const [newPRTitle, setNewPRTitle] = useState('');
+  const [newPRBody, setNewPRBody] = useState('');
+  const [newPRHead, setNewPRHead] = useState('');
+  // Keep this empty until repository metadata resolves its real default branch.
+  // The create workflow has its own authoritative fallback lookup.
+  const [newPRBase, setNewPRBase] = useState('');
+
+  const [releaseForm, setReleaseFormState] = useState<GitHubCreateReleaseParamsDto>({
+    owner: '',
+    repo: '',
+    tagName: '',
+    targetCommitish: '',
+    releaseName: '',
+    body: '',
+    draft: false,
+    prerelease: false,
+  });
+  const [releaseSubmitting, setReleaseSubmitting] = useState(false);
+  const [releaseError, setReleaseError] = useState<string | null>(null);
+  const [releaseSuccess, setReleaseSuccess] = useState<GitHubReleaseDto | null>(null);
+  const [showReleaseCreator, setShowReleaseCreator] = useState(false);
+  const [releaseContextLoading, setReleaseContextLoading] = useState(false);
+  const [releaseContextError, setReleaseContextError] = useState<string | null>(null);
+  const [releaseContext, setReleaseContext] = useState<GitHubReleaseContextDto | null>(null);
+  const [releaseNotesGenerating, setReleaseNotesGenerating] = useState(false);
+  const [releaseNotesLanguage, setReleaseNotesLanguage] = useState<'de' | 'en'>('en');
+  const [releaseNotesOptions, setReleaseNotesOptions] = useState<ReleaseNotesOptions>(DEFAULT_RELEASE_NOTES_OPTIONS);
+
+  return {
+    showCreatePR,
+    setShowCreatePR,
+    newPRTitle,
+    setNewPRTitle,
+    newPRBody,
+    setNewPRBody,
+    newPRHead,
+    setNewPRHead,
+    newPRBase,
+    setNewPRBase,
+    releaseForm,
+    setReleaseFormState,
+    releaseSubmitting,
+    setReleaseSubmitting,
+    releaseError,
+    setReleaseError,
+    releaseSuccess,
+    setReleaseSuccess,
+    showReleaseCreator,
+    setShowReleaseCreator,
+    releaseContextLoading,
+    setReleaseContextLoading,
+    releaseContextError,
+    setReleaseContextError,
+    releaseContext,
+    setReleaseContext,
+    releaseNotesGenerating,
+    setReleaseNotesGenerating,
+    releaseNotesLanguage,
+    setReleaseNotesLanguage,
+    releaseNotesOptions,
+    setReleaseNotesOptions,
+  };
+};

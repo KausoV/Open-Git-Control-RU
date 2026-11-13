@@ -1,0 +1,227 @@
+import type { ReleaseCommitDto } from './releaseNotes';
+export interface GitHubRepositoryDto {
+  id: number;
+  name: string;
+  fullName: string;
+  private: boolean;
+  cloneUrl: string;
+  htmlUrl: string;
+  description?: string | null;
+  updatedAt?: string;
+}
+
+export interface GitHubRepositoryDetailsDto {
+  owner: string;
+  repo: string;
+  fork: boolean;
+  parent: { owner: string; repo: string } | null;
+  defaultBranch: string;
+}
+
+export interface GitHubUploadReleaseAssetParamsDto {
+  owner: string;
+  repo: string;
+  /** Local repository that authorized creation of the target release. */
+  repoPath: string;
+  releaseId: number;
+  filePath: string;
+  name?: string;
+}
+
+export interface GitHubReleaseAssetDto {
+  id: number;
+  name: string;
+  browserDownloadUrl: string;
+}
+
+export interface GitHubForkParamsDto {
+  owner: string;
+  repo: string;
+  name?: string;
+  defaultBranchOnly?: boolean;
+}
+
+export interface GitHubRepositoryPageDto {
+  repos: GitHubRepositoryDto[];
+  nextPage: number | null;
+  hasMore: boolean;
+  totalCount: number | null;
+}
+
+export interface GitHubCreateReleaseParamsDto {
+  owner: string;
+  repo: string;
+  /** Local repository captured when the release submission was authorized. */
+  repoPath?: string;
+  tagName: string;
+  targetCommitish?: string;
+  releaseName: string;
+  body?: string;
+  draft?: boolean;
+  prerelease?: boolean;
+  targetInspection?: { id: string; mode: 'remote' | 'push-local' };
+}
+
+export interface GitHubInspectReleaseTargetParamsDto {
+  owner: string;
+  repo: string;
+  repoPath: string;
+  tagName: string;
+  targetCommitish?: string;
+}
+
+export interface GitHubReleaseTargetDto {
+  inspectionId: string;
+  target: string;
+  targetBranch: string | null;
+  localSha: string | null;
+  remoteSha: string | null;
+  ahead: number;
+  behind: number;
+  canPush: boolean;
+  canReleaseRemote: boolean;
+  pushBlockedReason: string | null;
+}
+
+export type ReleaseSubmissionPhase = 'idle' | 'checking' | 'awaiting-decision' | 'pushing' | 'creating';
+
+export interface GitHubReleaseDto {
+  id: number;
+  tagName: string;
+  name: string;
+  htmlUrl: string;
+  draft: boolean;
+  prerelease: boolean;
+  publishedAt: string | null;
+}
+
+export interface GitHubReleaseContextDto {
+  existingTags: string[];
+  lastReleaseTag: string | null;
+  repositoryHtmlUrl?: string | null;
+  commitsSinceLastRelease: ReleaseCommitDto[];
+  commitsTarget: string;
+  fallbackUsed: boolean;
+}
+
+export interface PullRequestDto {
+  number: number;
+  title: string;
+  state: string;
+  user: string;
+  createdAt: string;
+  updatedAt: string;
+  head: string;
+  headSha: string;
+  base: string;
+  merged: boolean;
+  htmlUrl: string;
+  draft: boolean;
+}
+
+export type CiBadgeStateDto = 'success' | 'failure' | 'pending' | 'neutral' | 'unknown';
+
+export interface GithubWorkflowRunDto {
+  id: number;
+  name: string;
+  workflowName: string;
+  status: string;
+  conclusion: string | null;
+  event: string;
+  htmlUrl: string;
+  branch: string;
+  headSha: string;
+  createdAt: string;
+  startedAt: string;
+  updatedAt: string;
+}
+
+export interface GithubWorkflowRunsPageDto {
+  runs: GithubWorkflowRunDto[];
+  page: number;
+  hasMore: boolean;
+  totalCount: number;
+}
+
+export interface GithubWorkflowStepDto {
+  number: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export interface GithubWorkflowJobDto {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  htmlUrl: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  steps: GithubWorkflowStepDto[];
+}
+
+export interface GithubWorkflowJobsPageDto {
+  jobs: GithubWorkflowJobDto[];
+  page: number;
+  hasMore: boolean;
+  totalCount: number;
+}
+
+export interface GithubCatalogSnapshotDto {
+  host: string;
+  username: string;
+  savedAt: string;
+  repos: GitHubRepositoryDto[];
+  /** Some private repositories are unavailable in this snapshot. */
+  refreshRequired?: boolean;
+}
+
+export interface GithubCreateRepositoryWithReadmeDto {
+  repository: GitHubRepositoryDto;
+  brandedReadme: boolean;
+  warning?: string;
+}
+
+export interface GithubCheckRunDto {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  detailsUrl: string | null;
+  appName: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export interface GithubStatusContextDto {
+  id: number;
+  context: string;
+  state: string;
+  description: string | null;
+  targetUrl: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface GithubStatusChecksDto {
+  state: string;
+  sha: string;
+  checkRuns: GithubCheckRunDto[];
+  statusContexts: GithubStatusContextDto[];
+}
+
+export interface PullRequestCiDto {
+  headSha: string;
+  badge: CiBadgeStateDto;
+  summary: string;
+  workflowRuns: GithubWorkflowRunDto[];
+  statusChecks: GithubStatusChecksDto | null;
+  updatedAt: number;
+}
+
+export type PullRequestMergeMethodDto = 'merge' | 'squash' | 'rebase';
+
+export type { DeviceFlowStartDto, DeviceFlowPollDto } from './hostingDtos';

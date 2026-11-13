@@ -1,0 +1,136 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { RepositoryAnalyticsService } from '../RepositoryAnalyticsService';
+import { DEFAULT_ANALYTICS_FILTERS } from '../../../src/shared/ipc/repositoryAnalytics';
+import { fixture, cleanupAnalyticsFixtures } from './analyticsFixture';
+
+vi.mock('electron', () => ({ app: { getPath: () => os.tmpdir() } }));
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await cleanupAnalyticsFixtures();
+});
+describe('offline repository analytics with real Git', () => {
+  it.each([false, true])(
+    'distinguishes a blame failure containing abort from a cancelled read (%s)',
+    async (cancelled) => {
+      const f = await fixture();
+      const original = f.engine.streamReadAtPath.bind(f.engine);
+      const failure = Object.assign(new Error("fatal: could not read 'abort-controller.ts': bad object"), { name: cancelled ? 'AbortError' : 'Error' });
+      vi.spyOn(f.engine, 'streamReadAtPath').mockImplementation((repo, args, onChunk, signal, input, env) => {
+        if (args.includes('blame') && args.at(-1) === 'a.ts') return Promise.reject(failure);
+        return original(repo, args, onChunk, signal, input, env);
+      });
+      if (cancelled) await expect(f.refresh()).rejects.toBe(failure);
+      else {
+        const result = await f.refresh();
+        expect(result.project.unblamedFiles).toBe(1);
+        expect(result.complete).toBe(false);
+        expect(result.project.blamedLines).toBeGreaterThan(0);
+      }
+    },
+    90000,
+  );
+  it('counts the complete history, ignores tracked paths, computes actual lines, coupling and release net changes', async () => {
+    const f = await fixture();
+    const value = await f.refresh();
+    expect(value.complete).toBe(true);
+    expect(value.totals.commits).toBe(3);
+    expect(value.totals.contributors).toBe(2);
+    expect(value.project).toMatchObject({ files: 4, lines: 10, blamedLines: 10, excludedFiles: 1, textFiles: 4 });
+    expect(value.hotspots.find((row) => row.path === 'a.ts')).toMatchObject({ changes: 3, additions: 4, deletions: 0, authors: 2 });
+    expect(value.hotspots.some((row) => row.path === 'vendor/ignored.txt')).toBe(false);
+    expect(value.coupling.find((pair) => pair.first === 'a.ts' && pair.second === 'b.ts')).toMatchObject({ commits: 3, share: 1 });
+    expect(value.comparison).toMatchObject({ from: 'v1.1.0', to: 'HEAD', commits: 1, additions: 2, deletions: 0, files: 2, ancestor: true });
+    expect(f.service.details({ repoPath: f.repo, snapshotId: value.id, kind: 'commits', offset: 0, limit: 2 }).total).toBe(3);
+    expect(fs.readFileSync(path.join(f.repo, 'a.ts'), 'utf8')).toBe('one\ntwo\nthree\nfour\n');
+  }, 90000);
+  it('uses cached snapshots across restart and reads only new diffs and changed-file blame', async () => {
+    const f = await fixture();
+    const first = await f.refresh();
+    const restored = new RepositoryAnalyticsService(f.engine, f.cache);
+    expect((await restored.snapshot({ repoPath: f.repo, filters: DEFAULT_ANALYTICS_FILTERS }))?.id).toBe(first.id);
+    const spy = vi.spyOn(f.engine, 'streamReadAtPath');
+    const unchanged = await f.refresh();
+    expect(unchanged.savedAt).toBe(first.savedAt);
+    expect(spy.mock.calls.some((call) => call[1].includes('--numstat') || call[1].includes('rev-list') || call[1].includes('log'))).toBe(false);
+    expect(spy.mock.calls.some((call) => call[1].includes('blame'))).toBe(false);
+    spy.mockClear();
+    f.write('a.ts', 'new\n');
+    await f.git('add', 'a.ts');
+    await f.git('commit', '-m', 'One changed file');
+    const next = await f.refresh();
+    expect(next.totals.commits).toBe(4);
+    expect(next.project.lines).toBe(7);
+    const history = spy.mock.calls.filter((call) => call[1].includes('log'));
+    expect(history).toHaveLength(1);
+    expect(history[0][4]!.toString().trim().split('\n')).toHaveLength(1);
+    expect(spy.mock.calls.filter((call) => call[1].includes('blame')).map((call) => call[1].at(-1))).toEqual(['a.ts']);
+  }, 90000);
+  it('retains immutable old detail reports while a background analysis publishes a new snapshot', async () => {
+    const f = await fixture();
+    const first = await f.refresh();
+    const original = f.service.details({ repoPath: f.repo, snapshotId: first.id, kind: 'coupling', offset: 0, limit: 200 });
+    f.write('a.ts', 'changed\n');
+    await f.git('add', 'a.ts');
+    await f.git('commit', '-m', 'A new project state');
+    let checked = false;
+    const next = await f.service.refresh({ repoPath: f.repo, filters: DEFAULT_ANALYTICS_FILTERS }, new AbortController().signal, (event) => {
+      if (event.snapshot && event.snapshot.id !== first.id) {
+        expect(f.service.details({ repoPath: f.repo, snapshotId: first.id, kind: 'coupling', offset: 0, limit: 200 })).toEqual(original);
+        checked = true;
+      }
+    });
+    expect(checked).toBe(true);
+    expect(next.couplingVersion).not.toBe(first.couplingVersion);
+    const filtered = await f.refresh({ ...DEFAULT_ANALYTICS_FILTERS, path: 'a.ts' });
+    expect(filtered.id).not.toBe(next.id);
+    expect(f.service.details({ repoPath: f.repo, snapshotId: next.id, kind: 'coupling', offset: 0, limit: 200 }).items).toEqual(next.coupling);
+  }, 90000);
+  it('keeps all filtered coupling pairs beyond the 100-row preview and 200-row transfer batch', async () => {
+    const f = await fixture(false);
+    for (let revision = 1; revision <= 3; revision++) {
+      for (let index = 0; index < 22; index++) f.write(`coupled/file-${String(index).padStart(2, '0')}.txt`, `${revision}\n`);
+      await f.git('add', '.');
+      await f.git('commit', '-m', `Change all coupled files ${revision}`);
+    }
+    const value = await f.refresh({ ...DEFAULT_ANALYTICS_FILTERS, path: 'coupled/' });
+    expect(value.coupling).toHaveLength(100);
+    const first = f.service.details({ repoPath: f.repo, snapshotId: value.id, kind: 'coupling', offset: 0, limit: 200 });
+    const remaining = f.service.details({ repoPath: f.repo, snapshotId: value.id, kind: 'coupling', offset: 200, limit: 200 });
+    expect(first.total).toBe(231);
+    expect(first.items).toHaveLength(200);
+    expect(remaining.items).toHaveLength(31);
+    const all = [...first.items, ...remaining.items];
+    expect(new Set(all.map((pair) => ('first' in pair ? `${pair.first}\0${pair.second}` : ''))).size).toBe(231);
+    expect(
+      all.every((pair) => 'first' in pair && pair.commits === 3 && pair.share === 1 && pair.first.startsWith('coupled/') && pair.second.startsWith('coupled/')),
+    ).toBe(true);
+  }, 90000);
+  it('deduplicates branches and remote refs, excludes internal refs and corrects deleted branch membership', async () => {
+    const f = await fixture();
+    await f.git('checkout', '-b', 'feature', 'v1.0.0');
+    f.write('feature.ts', 'feature\n');
+    await f.git('add', '.');
+    await f.git('commit', '-m', 'Feature');
+    const feature = (await f.git('rev-parse', 'HEAD')).trim();
+    await f.git('update-ref', 'refs/remotes/origin/feature', feature);
+    await f.git('update-ref', 'refs/ogc/internal', feature);
+    await f.git('checkout', 'main');
+    expect((await f.refresh()).totals.commits).toBe(4);
+    await f.git('branch', '-D', 'feature');
+    await f.git('update-ref', '-d', 'refs/remotes/origin/feature');
+    expect((await f.refresh()).totals.commits).toBe(3);
+  }, 90000);
+  it('does not count LFS pointers or binary bytes as text lines or churn', async () => {
+    const f = await fixture();
+    f.write('asset.bin', `version https://git-lfs.github.com/spec/v1\noid sha256:${'a'.repeat(64)}\nsize 1000000\n`);
+    fs.writeFileSync(path.join(f.repo, 'binary.bin'), Buffer.from([0, 1, 2, 3]));
+    await f.git('add', '.');
+    await f.git('commit', '-m', 'Assets');
+    const value = await f.refresh();
+    expect(value.project).toMatchObject({ lines: 10, lfsFiles: 1, binaryFiles: 1 });
+    expect(value.hotspots.find((row) => row.path === 'asset.bin')).toMatchObject({ additions: 0, deletions: 0, binary: true });
+  }, 90000);
+});

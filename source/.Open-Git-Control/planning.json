@@ -1,0 +1,250 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "id": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "name": "Open-Git-Control",
+      "description": "",
+      "kind": "repository",
+      "createdAt": 1781471628146,
+      "updatedAt": 1781471628146
+    }
+  ],
+  "items": [
+    {
+      "id": "4da43c6f-55d0-48e8-9857-e069255b4335",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "Export Timeline as png or mp4",
+      "description": "",
+      "priority": "low",
+      "status": "idea",
+      "tags": [],
+      "createdAt": 1782821498508,
+      "updatedAt": 1782821503810
+    },
+    {
+      "id": "0c2b6746-40c6-4fc6-b5a3-17885bba2188",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "Chat with Codebase",
+      "description": "Repositorys optional  vektorisieren und so für ki und menschen leicher durchsuchebar zu machen um allegmeinere fragen zu beantworten",
+      "priority": "medium",
+      "status": "idea",
+      "tags": [],
+      "createdAt": 1784044408308,
+      "updatedAt": 1784044413717
+    },
+    {
+      "id": "ea0d6656-903c-479b-8cd1-887b03ee1ad8",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "Integrierter CI/CD Pipeline Editor",
+      "description": "Feature: Wenn man in .github/workflows/ arbeitet, bietet die App einen visuellen Editor oder zumindest starkes, schemaspezifisches Autocomplete für GitHub Actions. Die KI kann helfen, Deployment-Pipelines aus einer Textbeschreibung zu generieren (z.B. \"Erstelle eine Pipeline, die Node.js testet und auf Vercel deployed\").",
+      "priority": "medium",
+      "status": "idea",
+      "tags": [],
+      "createdAt": 1784045089963,
+      "updatedAt": 1784045089963
+    },
+    {
+      "id": "95ecc552-11e9-4c76-9314-c733f4da0a22",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "Lokaler CI/CD Pipeline-Simulator",
+      "description": "Die Validierung von GitHub Actions läuft meist erst nach dem Push auf GitHub.\n\nKonzept: Integration eines Wrappers für act (ein Tool, das GitHub Actions Workflows lokal in Docker-Containern ausführt).\nUI: Ein eigener Tab \"Lokale CI/CD\", in dem Workflows simuliert, Logs live gestreamt und Fehler behoben werden können, bevor ein Commit gepusht wird.\nNutzen: Kürzere Feedback-Loops und sauberere Commit-Historien ohne unzählige \"Fix CI config\"-Commits.",
+      "priority": "medium",
+      "status": "idea",
+      "tags": [],
+      "createdAt": 1784045168703,
+      "updatedAt": 1784045168703
+    },
+    {
+      "id": "eaa8e7e3-4c34-4840-88ad-c5e1bb948f73",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "Let Ai explain",
+      "description": "Eine funktion die commits erklären lassen kann, wenn man einen rechsklick auf einen commit macht kommt dieser punk im kontext menü hinzu, dieses featur soll ki die änderungen des spezifischen commits erklären können die ki bekommte commit namen nachricht und beschreibung als kontext dazu die änderungen als kontext und dateinamen der geänderten dateien als kontext dann soll ki eine antwort generieren was in diesem commit passiert ist, was wurde geändert hinzugefügt oder umgesetz, damit leicht verständlich wird was passiert ist in diesem commit. diese antwort wird dann gespeichert damit sie später auch nochmal aufrufbar ist und nocth nochmal für den vergangenen commit generiert werdne muss es braucht aber auch eine zeitliche begrenzung der speicherung damit man nicht zu viel ansammelt und sich die nachrichten anheufen, der inhalt der ki antwort soll markdown sein wlecher dann gerendert wird und in einem modal angezeigt wird mit weiteren infos zum commit",
+      "priority": "medium",
+      "status": "idea",
+      "tags": [],
+      "createdAt": 1792355261758,
+      "updatedAt": 1792355261758
+    },
+    {
+      "id": "24836c97-af92-44db-9ce6-2e1c1df11b7b",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "Geführter Abschluss eines Arbeitsschritts",
+      "description": "Einen Ablauf „Prüfen → Committen → Pushen → PR erstellen“ aus den bestehenden Funktionen zusammensetzen. Bei Fehlern am betroffenen Schritt bleiben. Prüfergebnisse an den geprüften Dateistand binden, damit spätere Änderungen erneut geprüft werden.",
+      "priority": "medium",
+      "status": "planned",
+      "tags": [],
+      "createdAt": 1792501055349,
+      "updatedAt": 1792502658123
+    },
+    {
+      "id": "57717967-fe1e-4d28-8755-be401316c0fa",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "Entwicklungsserver und Tests gleichzeitig ausführen",
+      "description": "Die [Run-Verwaltung (line 79)](D:/Projects/Software/Open-Git-Control/electron/main-process/RepositoryRunService.ts:79) erlaubt momentan insgesamt nur einen laufenden Workflow. Mehrere Läufe mit eigenen Konsolen ermöglichen, beispielsweise Entwicklungsserver plus Tests. Schreibende Abläufe wie Formatierung gezielt koordinieren.",
+      "priority": "medium",
+      "status": "planned",
+      "tags": [],
+      "createdAt": 1792501076309,
+      "updatedAt": 1792502654874
+    },
+    {
+      "id": "a05e09cb-faf4-4c81-99f3-73d68181df01",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "KI-Commit-Plan vor Ausführung bearbeiten",
+      "description": "Der bestehende KI-Ablauf geht nach der Planung direkt zum Committen über. Dazwischen eine bearbeitbare Vorschau anbieten: Gruppen verändern, Dateien ausschließen, Nachrichten bearbeiten und einzelne Commits auswählen. Ansatzpunkt ist die [Planungs-/Ausführungsgrenze (line 73)](D:/Projects/Software/Open-Git-Control/electron/ai/AiAutoCommitRunSession.ts:73).",
+      "priority": "medium",
+      "status": "planned",
+      "tags": [],
+      "createdAt": 1792501086451,
+      "updatedAt": 1792502665319
+    },
+    {
+      "id": "fef11401-94ff-4855-a0f7-d014394c50eb",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "Command Palette an den aktuellen Zustand anpassen",
+      "description": "Einige Befehle erscheinen auch ohne aktives Repository und führen dann keine Aktion aus. Die [Palette (line 4)](D:/Projects/Software/Open-Git-Control/src/components/CommandPalette.tsx:4) um Voraussetzungen und deren Erklärung ergänzen; zuletzt verwendete Aktionen und tolerantere Suche hinzufügen. Das bestehende Muster zur Erklärung fehlender Voraussetzungen lässt sich wiederverwenden.",
+      "priority": "medium",
+      "status": "planned",
+      "tags": [],
+      "createdAt": 1792501190345,
+      "updatedAt": 1792502682304
+    },
+    {
+      "id": "40b5596c-9c43-480d-85ee-f5d97a60c897",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "CI-Status direkt an PRs anzeigen",
+      "description": "Aktuell wird der Status [erst nach einem Klick geladen (line 17)](D:/Projects/Software/Open-Git-Control/src/components/hosting/HostingChangeRequestChecks.tsx:17). Für sichtbare PRs automatisch einen kompakten Status laden, mit geprüftem Commit und Aktualisierungszeit. Laufende Prüfungen begrenzt aktualisieren. Das spart einzelne Statusabfragen.",
+      "priority": "medium",
+      "status": "planned",
+      "tags": [],
+      "createdAt": 1792501609973,
+      "updatedAt": 1792501609973
+    },
+    {
+      "id": "49f8d95b-ab3c-497f-811a-1f8525589818",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "PRs vollständig in der App reviewen",
+      "description": "PRs vollständig in der App reviewen: Die vorhandenen PR-Aktionen um Dateidiffs, Zeilenkommentare, Review-Entwürfe und Freigaben erweitern. Dafür den gemeinsamen [Hosting-Adapter (line 13)](D:/Projects/Software/Open-Git-Control/electron/hosting/HostingAdapter.ts:13) um entsprechende Fähigkeiten ergänzen und Anbieterunterschiede sichtbar machen.",
+      "priority": "medium",
+      "status": "planned",
+      "tags": [],
+      "createdAt": 1792501912964,
+      "updatedAt": 1792597037449
+    },
+    {
+      "id": "db7b013f-7a16-4a93-b769-1525c7ea4905",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "Repository-Übersicht mit Handlungsbedarf",
+      "description": "Die vorhandene Anzeige geänderter Repositories um ausstehende Pushes, neue Remote-Commits, fehlgeschlagene CI-Läufe und offene PRs ergänzen. Nach „Hier ist etwas zu tun“ filtern und nach Projekt oder Kunde gruppieren. in der lokalen repository seite oder auch im hosting bereich zusätzliche filter einstellungen und so weiter",
+      "priority": "medium",
+      "status": "planned",
+      "tags": [],
+      "createdAt": 1792501993133,
+      "updatedAt": 1792501993133
+    },
+    {
+      "id": "aa5c40b7-be80-40de-95a5-5512c4249e8e",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "Frei benennbare Run-Aktionen und Monorepo-Unterstützung",
+      "description": "Zusätzlich zu den fünf festen Aktionen eigene Abläufe wie „Integrationstests“, „Dokumentation“ oder „Migration“ erlauben. Arbeitsverzeichnis und Parameter pro Schritt ergänzen, damit Teilprojekte ohne lange Shell-Konstruktionen ausführbar werden. dabei soll mann auch eigenen anlegen dürfen oder entferne können damit man leicht seine eigene workflows anlegen kann, man soll dann mit einem schalter sagen könenn welcher der sachen im button im reposittory bereich angezeigt wird",
+      "priority": "medium",
+      "status": "planned",
+      "tags": [],
+      "createdAt": 1792502108453,
+      "updatedAt": 1792502108453
+    },
+    {
+      "id": "ebb43dbd-48f5-430e-b08e-7ee9a3c6d0e3",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "Einzelne Zeilen stagen",
+      "description": "Einzelne Zeilen stagen: Die vorhandenen Aktionen für ganze Änderungsblöcke um eine Zeilenauswahl ergänzen. Das erleichtert saubere Commits, wenn mehrere Themen denselben Block betreffen.",
+      "priority": "medium",
+      "status": "planned",
+      "tags": [],
+      "createdAt": 1792502128090,
+      "updatedAt": 1792608908843
+    },
+    {
+      "id": "68868582-9d66-423c-903b-3bd7ce03e6a2",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "Lokale Sicherung vor dem Verwerfen",
+      "description": "Vor Datei-Verwerfen oder größeren destruktiven Aktionen begrenzte lokale Sicherungen anbieten. Das Recovery Center könnte dann auch uncommittete Inhalte wiederherstellen. Beim Wiederherstellen zuerst Unterschiede anzeigen.",
+      "priority": "medium",
+      "status": "planned",
+      "tags": [],
+      "createdAt": 1792502157882,
+      "updatedAt": 1792502157882
+    },
+    {
+      "id": "7595b0a6-9610-4335-b639-93e33ce062a0",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "Konfliktlösung mit mehr Kontext",
+      "description": "Neben „current/incoming“ die gemeinsame Ausgangsversion anzeigen, Branchrollen klar benennen und früher verwendete Lösungen bei passenden Konflikten wieder vorschlagen.",
+      "priority": "medium",
+      "status": "planned",
+      "tags": [],
+      "createdAt": 1792502230492,
+      "updatedAt": 1792502230492
+    },
+    {
+      "id": "b77fd51f-9d8b-42ed-ba7b-42208bf500a3",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "Hosting-Daten gezielter aktualisieren",
+      "description": "Der [Hosting-Client (line 100)](D:/Projects/Software/Open-Git-Control/src/services/hostingClient.ts:100) entfernt nach vielen Aktionen sämtliche Cache-Einträge der Verbindung. Stattdessen nur betroffene Repositories, PR-Listen, Runs oder Releases aktualisieren. Dadurch könnten andere Ansichten ihren bereits geladenen Inhalt behalten.",
+      "priority": "medium",
+      "status": "planned",
+      "tags": [],
+      "createdAt": 1792502328619,
+      "updatedAt": 1792502328619
+    },
+    {
+      "id": "dc642928-eca8-42a5-8d9b-b8b4e591c11f",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "Große Übersichtslisten virtualisieren",
+      "description": "Lokale Repositories, Hosting-Katalog und Planner-Karten werden direkt als vollständige Listen gerendert. Bei großen Datenmengen nur sichtbare Einträge plus Reserve rendern. Den Nutzen mit mehreren hundert Repositories beziehungsweise vielen Aufgaben prüfen.",
+      "priority": "medium",
+      "status": "planned",
+      "tags": [],
+      "createdAt": 1792502362933,
+      "updatedAt": 1792502362933
+    },
+    {
+      "id": "6a5b52e7-4625-4c1e-ad8f-a44312227661",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "Messbare Performance-Ziele ergänzen",
+      "description": "Die vorhandenen Diagnosen für feste Szenarien auswerten: Kaltstart, Repository-Wechsel, große Historie, viele geänderte Dateien und längere Sitzungen. Weitere Optimierungen anschließend anhand der gemessenen Verzögerungen priorisieren.",
+      "priority": "medium",
+      "status": "planned",
+      "tags": [],
+      "createdAt": 1792502701083,
+      "updatedAt": 1792502701083
+    },
+    {
+      "id": "f32246ae-d4f7-4459-8194-869c675e039e",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "user issue formular shcneller machen nicht alles flicht machen",
+      "description": "",
+      "priority": "medium",
+      "status": "planned",
+      "tags": [
+        "Planned"
+      ],
+      "createdAt": 1793053833086,
+      "updatedAt": 1793053833086
+    },
+    {
+      "id": "f85c99b9-35d4-48a2-9014-1bbe3245f707",
+      "projectId": "cb105c0a-6524-485d-8378-4d4e354634d4",
+      "title": "branch wechsel",
+      "description": "beim welches zu einem anderen branch dauert es sehr lange bis es oben angezeigt wrid auch in der commit liste dauert es lange",
+      "priority": "medium",
+      "status": "bug",
+      "tags": [
+        "Bug"
+      ],
+      "createdAt": 1793218330070,
+      "updatedAt": 1793218330070
+    }
+  ]
+}

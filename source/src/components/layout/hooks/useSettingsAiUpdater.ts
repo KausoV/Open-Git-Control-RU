@@ -1,0 +1,274 @@
+import { peekResource } from '@/data/clientCache';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { AppSettingsDto, UpdaterStatusDto } from '@/types/appDtos';
+import type { TranslationVariables } from '@/i18n';
+import { aiClient } from '@/services/aiClient';
+import { appClient } from '@/services/appClient';
+import type { SettingsUpdateHandler } from '../settings/SettingsSectionPrimitives';
+
+type TranslateFn = (deText: string, enText: string) => string;
+type CatalogTranslateFn = (key: string, variables?: TranslationVariables) => string;
+
+type Params = {
+  settings: AppSettingsDto;
+  onUpdateSettings: SettingsUpdateHandler;
+  t: CatalogTranslateFn;
+  tr: TranslateFn;
+  onToast: (message: string, isError: boolean) => void;
+};
+
+export const useSettingsAiUpdater = ({ settings, onUpdateSettings, t, tr, onToast }: Params) => {
+  const [isTestingAi, setIsTestingAi] = useState(false);
+  const [isLoadingModels, setIsLoadingModels] = useState(false);
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [geminiApiKeyInput, setGeminiApiKeyInput] = useState('');
+  const [openAiApiKeyInput, setOpenAiApiKeyInput] = useState('');
+  const [appVersion, setAppVersion] = useState(() => peekResource<string>('app', 'getAppVersion') || '');
+  const [updaterStatus, setUpdaterStatus] = useState<UpdaterStatusDto | null>(() => peekResource<UpdaterStatusDto>('app', 'getUpdaterStatus') || null);
+  const [isRunningUpdate, setIsRunningUpdate] = useState(false);
+  const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
+
+  // Bumped whenever the AI provider changes. A model list belongs to one
+  // provider; switching providers must clear it and invalidate any in-flight
+  // list request so another provider's models never appear.
+  const modelsGenerationRef = useRef(0);
+  useEffect(() => {
+    modelsGenerationRef.current += 1;
+    setModelOptions([]);
+  }, [settings.aiProvider]);
+
+  const selectedModel =
+    settings.aiProvider === 'gemini' ? settings.geminiModel : settings.aiProvider === 'openai' ? settings.openAiModel : settings.ollamaModel;
+
+  const mergedModelOptions = useMemo(() => {
+    const values = [...modelOptions, selectedModel].filter(Boolean);
+    return [...new Set(values)].sort((a, b) => a.localeCompare(b));
+  }, [modelOptions, selectedModel]);
+
+  const updaterStatusLabel = useMemo(() => {
+    if (!updaterStatus) return t('generated.components.layout.hooks.usesettingsaiupdater.loading_updater_status_6a392297');
+
+    switch (updaterStatus.state) {
+      case 'checking':
+        return t('generated.components.layout.hooks.usesettingsaiupdater.checking_for_updates_67d1a534');
+      case 'release-pending':
+        return t('updates.releasePendingStatus');
+      case 'update-available':
+        return t('generated.components.layout.hooks.usesettingsaiupdater.update_available_7d5009e4');
+      case 'no-update':
+        return t('generated.components.layout.hooks.usesettingsaiupdater.app_is_up_to_date_a8f83489');
+      case 'downloading':
+        return t('generated.components.layout.hooks.usesettingsaiupdater.downloading_update_b2499c0b');
+      case 'downloaded':
+        return t('generated.components.layout.hooks.usesettingsaiupdater.update_ready_to_install_adfcba43');
+      case 'error':
+        return t('generated.components.layout.hooks.usesettingsaiupdater.updater_error_36334f65');
+      case 'idle':
+      default:
+        return t('generated.components.layout.hooks.usesettingsaiupdater.ready_544f4b02');
+    }
+  }, [updaterStatus, t]);
+
+  const updaterSupported = Boolean(updaterStatus?.isSupported);
+  const installedVersion = appVersion || updaterStatus?.currentVersion || t('generated.components.layout.hooks.usesettingsaiupdater.unknown_3f835544');
+
+  const oneClickUpdateLabel = useMemo(() => {
+    if (isInstallingUpdate) return t('generated.components.layout.hooks.usesettingsaiupdater.installing_update_b4260e49');
+    if (isRunningUpdate || updaterStatus?.state === 'checking')
+      return t('generated.components.layout.hooks.usesettingsaiupdater.checking_for_updates_67d1a534');
+    if (updaterStatus?.state === 'downloading') return t('generated.components.layout.hooks.usesettingsaiupdater.downloading_update_b2499c0b');
+    if (updaterStatus?.state === 'downloaded') return t('generated.components.layout.hooks.usesettingsaiupdater.install_update_f3aa2988');
+    if (updaterStatus?.state === 'update-available') return t('generated.components.layout.hooks.usesettingsaiupdater.download_update_8917c04f');
+    return t('generated.components.layout.hooks.usesettingsaiupdater.check_for_updates_a131e2c5');
+  }, [isInstallingUpdate, t, isRunningUpdate, updaterStatus?.state]);
+
+  const oneClickUpdateDisabled =
+    !updaterSupported || isRunningUpdate || isInstallingUpdate || updaterStatus?.state === 'checking' || updaterStatus?.state === 'downloading';
+
+  const setSelectedModel = async (model: string) => {
+    if (settings.aiProvider === 'gemini') {
+      await onUpdateSettings({ geminiModel: model });
+      return;
+    }
+    if (settings.aiProvider === 'openai') {
+      await onUpdateSettings({ openAiModel: model });
+      return;
+    }
+    await onUpdateSettings({ ollamaModel: model });
+  };
+
+  const formatBytes = (bytes: number | null): string => {
+    if (!bytes || !Number.isFinite(bytes) || bytes <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let value = bytes;
+    let unitIndex = 0;
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex += 1;
+    }
+    return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+  };
+
+  const testConnection = async () => {
+    if (!aiClient.isAvailable()) return;
+    setIsTestingAi(true);
+    try {
+      const result = await aiClient.testConnection();
+      if (!result.success) {
+        onToast(tr(`Verbindung fehlgeschlagen: ${result.error}`, `Connection failed: ${result.error}`), true);
+        return;
+      }
+      onToast(
+        tr(
+          `Verbunden: ${result.data.provider} / ${result.data.model} (${result.data.detail})`,
+          `Connected: ${result.data.provider} / ${result.data.model} (${result.data.detail})`,
+        ),
+        false,
+      );
+    } catch (error: unknown) {
+      onToast(error instanceof Error ? error.message : t('generated.components.layout.hooks.usesettingsaiupdater.connection_failed_8780a183'), true);
+    } finally {
+      setIsTestingAi(false);
+    }
+  };
+
+  const loadModels = async () => {
+    if (!aiClient.isAvailable()) return;
+    const generation = modelsGenerationRef.current;
+    const isCurrent = () => modelsGenerationRef.current === generation;
+    setIsLoadingModels(true);
+    try {
+      const result = await aiClient.listModels();
+      if (!isCurrent()) return;
+      if (!result.success) {
+        onToast(tr(`Modelle konnten nicht geladen werden: ${result.error}`, `Could not load models: ${result.error}`), true);
+        return;
+      }
+      setModelOptions(result.data);
+      if (!selectedModel && result.data.length > 0) {
+        await setSelectedModel(result.data[0]);
+      }
+      onToast(tr(`${result.data.length} Modell(e) geladen.`, `${result.data.length} model(s) loaded.`), false);
+    } catch (error: unknown) {
+      if (!isCurrent()) return;
+      onToast(error instanceof Error ? error.message : t('generated.components.layout.hooks.usesettingsaiupdater.could_not_load_models_c6582ed1'), true);
+    } finally {
+      if (isCurrent()) setIsLoadingModels(false);
+    }
+  };
+
+  const handleRunOneClickUpdate = async () => {
+    if (!appClient.isAvailable()) return;
+
+    if (updaterStatus?.state === 'downloaded') {
+      setIsInstallingUpdate(true);
+      try {
+        const result = await appClient.installAppUpdate();
+        if (!result.success) {
+          onToast(result.error || t('generated.components.layout.hooks.usesettingsaiupdater.could_not_start_update_installation_21a3223d'), true);
+          return;
+        }
+        onToast(t('generated.components.layout.hooks.usesettingsaiupdater.restarting_app_to_install_update_f142b007'), false);
+      } catch (error: unknown) {
+        onToast(
+          error instanceof Error ? error.message : t('generated.components.layout.hooks.usesettingsaiupdater.could_not_start_update_installation_21a3223d'),
+          true,
+        );
+      } finally {
+        setIsInstallingUpdate(false);
+      }
+      return;
+    }
+
+    setIsRunningUpdate(true);
+    try {
+      const result = await appClient.runOneClickAppUpdate();
+      if (!result.success) {
+        onToast(result.error || t('generated.components.layout.hooks.usesettingsaiupdater.could_not_start_update_cc36018f'), true);
+        return;
+      }
+      if (result.action === 'downloaded') {
+        onToast(t('generated.components.layout.hooks.usesettingsaiupdater.update_downloaded_and_ready_to_install_06156b66'), false);
+        return;
+      }
+      if (result.action === 'no-update') {
+        onToast(t('generated.components.layout.hooks.usesettingsaiupdater.app_is_already_up_to_date_0f3d23f1'), false);
+        return;
+      }
+      if (result.action === 'release-pending') {
+        onToast(t('updates.releasePendingMessage'), false);
+        return;
+      }
+      onToast(t('generated.components.layout.hooks.usesettingsaiupdater.update_check_completed_bde0b1e8'), false);
+    } catch (error: unknown) {
+      onToast(error instanceof Error ? error.message : t('generated.components.layout.hooks.usesettingsaiupdater.could_not_start_update_cc36018f'), true);
+    } finally {
+      setIsRunningUpdate(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!appClient.isAvailable()) return;
+    let active = true;
+
+    const bootstrapUpdater = async () => {
+      try {
+        const version = await appClient.getAppVersion();
+        if (active) setAppVersion(version);
+      } catch {
+        if (active) onToast(t('generated.components.layout.hooks.usesettingsaiupdater.could_not_load_app_version_417cc507'), true);
+      }
+
+      try {
+        const status = await appClient.getUpdaterStatus();
+        if (!active) return;
+        setUpdaterStatus(status);
+        if (status.currentVersion) setAppVersion((current) => current || status.currentVersion);
+      } catch {
+        if (!active || peekResource('app', 'getUpdaterStatus')) return;
+        onToast(t('generated.components.layout.hooks.usesettingsaiupdater.could_not_load_updater_status_2df70231'), true);
+      }
+    };
+
+    void bootstrapUpdater();
+
+    const unsubscribe = appClient.onUpdaterEvent((status) => {
+      if (!active) return;
+      setUpdaterStatus(status);
+      if (status.currentVersion) setAppVersion((current) => current || status.currentVersion);
+    });
+
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [onToast, t, tr]);
+
+  return {
+    isTestingAi,
+    isLoadingModels,
+    showToast: onToast,
+    modelOptions,
+    geminiApiKeyInput,
+    setGeminiApiKeyInput,
+    openAiApiKeyInput,
+    setOpenAiApiKeyInput,
+    appVersion,
+    updaterStatus,
+    isRunningUpdate,
+    selectedModel,
+    mergedModelOptions,
+    updaterStatusLabel,
+    updaterSupported,
+    installedVersion,
+    oneClickUpdateLabel,
+    oneClickUpdateDisabled,
+    setSelectedModel,
+    formatBytes,
+    testConnection,
+    loadModels,
+    handleRunOneClickUpdate,
+  };
+};
+
+export type SettingsAiUpdaterState = ReturnType<typeof useSettingsAiUpdater>;

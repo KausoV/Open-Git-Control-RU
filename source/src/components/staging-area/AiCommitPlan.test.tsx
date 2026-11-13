@@ -1,0 +1,198 @@
+// @vitest-environment jsdom
+import { act, createElement } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { I18nProvider } from '@/i18n';
+import type { AiAutoCommitGroupDto } from '@/types/aiDtos';
+import { AiCommitPlan } from './AiCommitPlan';
+import { useAiCommit } from './useAiCommit';
+import { gitClient } from '@/services/gitClient';
+import type { GitStatusWithConflicts } from './types';
+import { explainGitNotification } from '@/utils/gitFailure';
+import { NotificationProvider } from '@/contexts/NotificationContext';
+import { resourceKey, setActiveResourceRepository } from '@/data/clientCache';
+import { queryClient } from '@/data/queryClient';
+
+const mocks = vi.hoisted(() => ({ run: vi.fn(), cancel: vi.fn(), state: vi.fn(), subscribe: vi.fn() }));
+vi.mock('@/services/aiClient', () => ({
+  aiClient: { isAvailable: () => true, runAutoCommit: mocks.run, cancelAutoCommit: mocks.cancel, getAutoCommitState: mocks.state, onJobEvent: mocks.subscribe },
+}));
+let host: HTMLDivElement;
+let root: Root;
+let controls: ReturnType<typeof useAiCommit>;
+const refresh = vi.fn(async () => {});
+const updated = vi.fn();
+const toast = vi.fn();
+const group: AiAutoCommitGroupDto = {
+  id: 'staged',
+  source: 'staged',
+  changeIds: ['s1'],
+  paths: ['packages/api.ts', 'tests/api.test.ts'],
+  title: 'fix: preserve API state',
+  description: 'Preserves the snapshot.',
+  rationale: 'API and test belong together.',
+  status: 'committed',
+  messageSource: 'fallback',
+  hash: 'abcdef0123456789',
+};
+const status = {
+  staged: [{ path: 'same.ts', status: 'M' }],
+  unstaged: [{ path: 'same.ts', status: 'M' }],
+  untracked: [],
+  conflicts: [],
+} as unknown as GitStatusWithConflicts;
+function Harness() {
+  controls = useAiCommit({ repoPath: '/repo', status, setToast: toast, refresh, onCommitsCreated: updated });
+  return createElement(AiCommitPlan, { groups: controls.aiGroups });
+}
+beforeEach(() => {
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  host = document.createElement('div');
+  document.body.append(host);
+  root = createRoot(host);
+  vi.clearAllMocks();
+  vi.spyOn(gitClient, 'ensureCommitIdentity').mockResolvedValue(true);
+  mocks.state.mockResolvedValue({ success: true, data: null });
+  mocks.subscribe.mockReturnValue(() => {});
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+  act(() => root.unmount());
+  host.remove();
+});
+
+describe('AI commit plan and run controls', () => {
+  it('does not start AI work or stage files when identity setup is cancelled', async () => {
+    vi.mocked(gitClient.ensureCommitIdentity).mockResolvedValue(false);
+    await act(async () => {
+      root.render(createElement(I18nProvider, { language: 'en', children: createElement(Harness) }));
+    });
+    await act(async () => {
+      await controls.handleAiAutoCommit();
+    });
+    expect(gitClient.ensureCommitIdentity).toHaveBeenCalledExactlyOnceWith('/repo');
+    expect(mocks.run).not.toHaveBeenCalled();
+    expect(controls.isAiCommitting).toBe(false);
+    expect(controls.isAiJobRunning).toBe(false);
+    expect(toast).not.toHaveBeenCalled();
+  });
+  it('shows groups, staged source, paths, fallback and durable commit status', async () => {
+    await act(async () => {
+      root.render(createElement(I18nProvider, { language: 'en', children: createElement(AiCommitPlan, { groups: [group] }) }));
+    });
+    expect(host.textContent).toContain('Commit plan · 1/1');
+    expect(host.textContent).toContain('Staged snapshot');
+    expect(host.textContent).toContain('Fallback commit');
+    expect(host.textContent).toContain('tests/api.test.ts');
+    expect(host.querySelectorAll('summary')).toHaveLength(2);
+    expect(host.querySelector('code')?.textContent).toBe('abcdef012345');
+  });
+
+  it('prevents duplicate starts, deduplicates file counters and retains partial results', async () => {
+    const historyKey = resourceKey('git', 'getCommitLogPage', [{ repoPath: '/repo' }]);
+    const otherHistoryKey = resourceKey('git', 'getCommitLogPage', [{ repoPath: '/other' }]);
+    for (const key of [historyKey, otherHistoryKey]) queryClient.setQueryData(key, { success: true, data: 'old history' });
+    setActiveResourceRepository('/other');
+    let resolve!: (value: unknown) => void;
+    mocks.run.mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    await act(async () => {
+      root.render(createElement(I18nProvider, { language: 'en', children: createElement(Harness) }));
+    });
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = controls.handleAiAutoCommit();
+      void controls.handleAiAutoCommit();
+    });
+    expect(mocks.run).toHaveBeenCalledTimes(1);
+    expect(controls.aiRemainingFiles).toBe(1);
+    await act(async () => {
+      resolve({
+        success: true,
+        data: {
+          outcome: 'partial',
+          summary: 'One commit created; hook rejected the next.',
+          groups: [group],
+          commits: [{ hash: group.hash, subject: group.title }],
+          warnings: [],
+          diagnostics: [],
+          processedFiles: 0,
+          remainingFiles: 1,
+        },
+      });
+      await pending;
+    });
+    expect(controls.aiGroups).toEqual([group]);
+    expect(controls.isAiCommitting).toBe(false);
+    expect(controls.aiPhase).toBe('failed');
+    expect(controls.aiProcessedFiles).toBe(0);
+    expect(controls.aiRemainingFiles).toBe(1);
+    expect(toast).toHaveBeenLastCalledWith({ msg: 'One commit created; hook rejected the next.', isError: true, errorExplained: true });
+    expect(updated).toHaveBeenCalled();
+    expect(queryClient.getQueryState(historyKey)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(otherHistoryKey)?.isInvalidated).toBe(false);
+  });
+
+  it.each([
+    'Git operation was aborted.',
+    'AI provider request was cancelled by the server.',
+    'AI Auto-Commit exceeded the 10-minute time limit. No further commits will be created.',
+  ])('keeps a failed AI run visible as an error with its original reason: %s', async (message) => {
+    mocks.run.mockResolvedValue({ success: false, error: message });
+    await act(async () => root.render(createElement(I18nProvider, { language: 'en', children: createElement(Harness) })));
+    await act(async () => controls.handleAiAutoCommit());
+
+    expect(controls.aiPhase).toBe('failed');
+    expect(controls.isAiJobRunning).toBe(false);
+    const notification = toast.mock.calls.at(-1)![0];
+    expect(notification).toMatchObject({ msg: message, isError: true, errorExplained: true });
+    expect(explainGitNotification(notification, (_de, en) => en)).toBe(notification);
+  });
+
+  it('shows a cancellation only when the backend explicitly reports one', async () => {
+    mocks.run.mockResolvedValue({ success: false, cancelled: true, error: 'KI Auto-Commit wurde wegen Repository-Wechsel abgebrochen.' });
+    await act(async () => root.render(createElement(I18nProvider, { language: 'en', children: createElement(Harness) })));
+    await act(async () => controls.handleAiAutoCommit());
+
+    expect(controls.aiPhase).toBe('cancelled');
+    expect(toast).toHaveBeenLastCalledWith(expect.objectContaining({ isError: false, msg: expect.stringContaining('Repository-Wechsel') }));
+  });
+
+  it('preserves AI error context through the actual app notification controller', async () => {
+    const notifications = { publish: vi.fn(), update: vi.fn(), dismiss: vi.fn() };
+    const message = 'Git operation was aborted.';
+    mocks.run.mockResolvedValue({ success: false, error: message });
+    await act(async () =>
+      root.render(
+        createElement(NotificationProvider, {
+          value: notifications,
+          children: createElement(I18nProvider, { language: 'en', children: createElement(Harness) }),
+        }),
+      ),
+    );
+    await act(async () => controls.handleAiAutoCommit());
+
+    expect(notifications.publish).toHaveBeenCalledExactlyOnceWith({ msg: message, isError: true, errorExplained: true });
+    expect(toast).not.toHaveBeenCalled();
+    expect(explainGitNotification(notifications.publish.mock.calls[0][0], (_de, en) => en).isError).toBe(true);
+  });
+
+  it('retains durable partial-result errors even when Git diagnostics contain aborted', async () => {
+    const summary = 'One commit created. Git operation was aborted.';
+    mocks.run.mockResolvedValue({
+      success: true,
+      data: { outcome: 'partial', summary, commits: [{ hash: group.hash, subject: group.title }], groups: [group] },
+    });
+    await act(async () => root.render(createElement(I18nProvider, { language: 'en', children: createElement(Harness) })));
+    await act(async () => controls.handleAiAutoCommit());
+
+    expect(controls.aiGroups).toEqual([group]);
+    const notification = toast.mock.calls.at(-1)![0];
+    expect(notification).toMatchObject({ msg: summary, isError: true, errorExplained: true });
+    expect(explainGitNotification(notification, (_de, en) => en).isError).toBe(true);
+  });
+});

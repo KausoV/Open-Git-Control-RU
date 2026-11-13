@@ -1,0 +1,49 @@
+.analytics-filters {
+  padding: 10px 12px 14px;
+  border-top: 1px solid var(--border-color);
+}
+.analytics-filters-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.analytics-filters-heading h3 {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+.analytics-filter-panel {
+  display: grid;
+  gap: 8px;
+}
+.analytics-filter-panel label {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 4px;
+  color: var(--text-secondary);
+  font-size: 0.71rem;
+}
+.analytics-filter-panel .ui-field {
+  width: 100%;
+  min-width: 0;
+  font-size: 0.76rem;
+  min-height: 28px;
+  padding-block: 4px;
+}
+.analytics-filter-dates {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+}
+.analytics-filter-dates .ui-field {
+  padding-inline: 5px;
+  font-size: 0.68rem;
+}
+.analytics-project-filter {
+  margin-top: 3px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-subtle);
+}

@@ -1,0 +1,23 @@
+@import '../markdown-preview.css';
+
+.diff-blame-cell.empty {
+  border-right: 1px solid var(--line-subtle);
+  background: var(--bg-darker);
+}
+
+/* Spinner for loading state */
+.spinner-mini {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--text-secondary);
+  border-radius: 50%;
+  border-top-color: transparent;
+  animation: spin-mini-anim 0.8s linear infinite;
+}
+
+@keyframes spin-mini-anim {
+  to {
+    transform: rotate(360deg);
+  }
+}

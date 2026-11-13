@@ -1,0 +1,491 @@
+import { spawn } from 'child_process';
+import { randomUUID } from 'crypto';
+import { ipcMain, shell } from 'electron';
+import * as fs from 'fs';
+import * as path from 'path';
+import type { GitService, RepositoryFileSource } from '../../../GitService';
+import { resolveExistingRepositoryPath, resolveRepositoryPathForCreate } from '../../../git/RepositoryPathSafety';
+import { repositoryPathKey, requireActiveRepositoryPath } from '../../activeRepositoryAuthorization';
+import { IpcChannel } from '../../../../src/types/ipcContract';
+import type { RepositoryTextEncoding } from '../../../git/RepositoryFileEncoding';
+import { registerWorkingDirectoryFileInfoHandler } from './workingDirectoryFileInfo';
+import { registerWorkingDirectoryFileCreationHandler } from './workingDirectoryFileCreation';
+import { registerWorkingDirectoryToolsHandlers } from './workingDirectoryTools';
+import { registerWorkingDirectoryPreviewHandler } from './workingDirectoryPreview';
+import { registerRepositoryFileViewerHandlers } from './repositoryFileViewer';
+import { registerGitLfsHandlers } from './gitLfsHandlers';
+import { windowsSystemExecutable } from '../../../system-tools/windowsSystemExecutable';
+import { createRepositoryPathResolver } from '../../../git/RepositoryPathSafetyAsync';
+import { pathExists } from './workingDirectoryAsyncFs';
+import { withWorkingDirectoryWrite } from './workingDirectoryWrite';
+
+type RegisterGitFileHandlersDeps = {
+  gitService: GitService;
+  readStoredRepoPaths?: () => string[];
+  ensureWriteAllowed?: (repoPath: string) => void;
+};
+
+const REPOSITORY_FILE_SOURCES = new Set<RepositoryFileSource>(['unstaged', 'staged', 'commit']);
+const REPOSITORY_PATH_OPEN_ACTIONS = new Set(['reveal', 'open', 'openWith']);
+const TEXT_ENCODINGS = new Set<RepositoryTextEncoding>(['utf8', 'utf8-bom', 'utf16le', 'utf16be', 'latin1']);
+
+// Never trim a repository-relative path: leading/trailing whitespace is a
+// significant part of a Git filename. Only reject an entirely empty value.
+const asRepositoryFilePath = (value: unknown): string => (typeof value === 'string' ? value : value == null ? '' : String(value));
+const normalizeRepositoryFileSource = (value: unknown): RepositoryFileSource => {
+  const source = String(value || '').trim();
+  if (!REPOSITORY_FILE_SOURCES.has(source as RepositoryFileSource)) {
+    throw new Error('Invalid repository file source.');
+  }
+  return source as RepositoryFileSource;
+};
+const findExistingParentPath = (targetPath: string): string => {
+  let currentPath = targetPath;
+  while (!fs.existsSync(currentPath)) {
+    const parentPath = path.dirname(currentPath);
+    if (parentPath === currentPath) {
+      throw new Error('No existing parent directory was found.');
+    }
+    currentPath = parentPath;
+  }
+  return currentPath;
+};
+
+const createSiblingTemporaryPath = (targetPath: string, purpose: string): string =>
+  path.join(path.dirname(targetPath), `.${path.basename(targetPath)}.ogc-${purpose}-${process.pid}-${randomUUID()}`);
+
+const lstatIfExists = (targetPath: string): fs.Stats | null => {
+  try {
+    return fs.lstatSync(targetPath);
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+};
+
+const readIgnoreFileSafely = (repoRoot: string): { targetPath: string; content: string; mode: number } => {
+  const targetPath = resolveRepositoryPathForCreate(repoRoot, '.gitignore', 'Ignore file');
+  const targetStats = lstatIfExists(targetPath);
+  if (!targetStats) {
+    return { targetPath, content: '', mode: 0o644 };
+  }
+  // Do not follow either kind of filesystem indirection. In particular,
+  // appendFile follows dangling links and mutates the target of hard links.
+  if (targetStats.isSymbolicLink()) throw new Error('Ignore file must not be a symbolic link.');
+  if (!targetStats.isFile()) throw new Error('Ignore file must be a regular file.');
+  if (targetStats.nlink > 1) throw new Error('Ignore file must not have hard links.');
+
+  const physicalTargetPath = resolveExistingRepositoryPath(repoRoot, '.gitignore', 'Ignore file');
+  const physicalStats = fs.lstatSync(physicalTargetPath);
+  if (!physicalStats.isFile() || physicalStats.isSymbolicLink() || physicalStats.nlink > 1) {
+    throw new Error('Ignore file must be an unlinked regular file.');
+  }
+  return { targetPath, content: fs.readFileSync(physicalTargetPath, 'utf-8'), mode: targetStats.mode & 0o777 };
+};
+
+const replaceIgnoreFileAtomically = (targetPath: string, content: string, mode: number): void => {
+  const temporaryPath = createSiblingTemporaryPath(targetPath, 'ignore');
+  let descriptor: number | null = null;
+  try {
+    descriptor = fs.openSync(temporaryPath, 'wx', mode);
+    fs.writeFileSync(descriptor, content, 'utf-8');
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = null;
+    // Renaming replaces a link itself rather than following it, so even a
+    // concurrent path swap cannot redirect this write outside the repository.
+    fs.renameSync(temporaryPath, targetPath);
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor);
+    if (lstatIfExists(temporaryPath)) fs.rmSync(temporaryPath, { force: true });
+  }
+};
+
+const restoreReplacedTarget = async (targetPath: string, backupPath: string | null): Promise<boolean> => {
+  if (!backupPath || !(await pathExists(backupPath))) return true;
+  try {
+    if (await pathExists(targetPath)) await fs.promises.rm(targetPath, { recursive: true, force: true });
+    await fs.promises.rename(backupPath, targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const publishReplacement = async (preparedPath: string, targetPath: string, overwrite: boolean, ensureContext: () => void): Promise<void> => {
+  let backupPath: string | null = null;
+  let retainBackup = false;
+  if (await pathExists(targetPath)) {
+    if (!overwrite) throw new Error('Target already exists.');
+    backupPath = createSiblingTemporaryPath(targetPath, 'backup');
+    ensureContext();
+    await fs.promises.rename(targetPath, backupPath);
+  }
+  try {
+    ensureContext();
+    await fs.promises.rename(preparedPath, targetPath);
+  } catch (error) {
+    retainBackup = !(await restoreReplacedTarget(targetPath, backupPath));
+    throw error;
+  } finally {
+    if (!retainBackup && backupPath) await fs.promises.rm(backupPath, { recursive: true, force: true });
+  }
+};
+
+const openWithSystemChooser = async (targetPath: string): Promise<void> => {
+  if (process.platform !== 'win32') {
+    const openError = await shell.openPath(targetPath);
+    if (openError) throw new Error(openError);
+    return;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(windowsSystemExecutable('rundll32.exe'), ['shell32.dll,OpenAs_RunDLL', targetPath], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.once('error', reject);
+    child.once('spawn', () => {
+      child.unref();
+      resolve();
+    });
+  });
+};
+
+export function registerGitFileHandlers({ gitService, readStoredRepoPaths = () => [], ensureWriteAllowed = () => {} }: RegisterGitFileHandlersDeps): void {
+  const workingDirectoryPathAsync = async (repoPath: string, value: unknown, label: string, allowMissing = false) => {
+    const resolver = await createRepositoryPathResolver(repoPath);
+    return allowMissing ? resolver.forCreateWithoutSymlinks(value, label) : resolver.existingWithoutSymlinks(value, label);
+  };
+
+  ipcMain.handle(IpcChannel.GitListWorkingDirectory, async (_event: unknown, requestedRepoPath?: unknown, requestedParentPath?: unknown) => {
+    try {
+      const repoPath = requireActiveRepositoryPath(requestedRepoPath, gitService.getRepoPath(), IpcChannel.GitListWorkingDirectory);
+      const parentPath = asRepositoryFilePath(requestedParentPath);
+      const directoryPath = parentPath ? await workingDirectoryPathAsync(repoPath, parentPath, 'Directory path') : await fs.promises.realpath(repoPath);
+      if (!(await fs.promises.stat(directoryPath)).isDirectory()) throw new Error('Target path is not a directory.');
+      const entries: Array<{ path: string; name: string; kind: 'file' | 'directory'; bytes?: number }> = [];
+      for (const item of await fs.promises.readdir(directoryPath, { withFileTypes: true })) {
+        // Project dotfiles (for example .gitignore and .github) are ordinary
+        // working-tree entries. Git metadata remains inaccessible through the
+        // path-safety boundary and is not useful to expose in this browser.
+        if (item.name.toLowerCase() === '.git') continue;
+        const childRelativePath = parentPath ? `${parentPath}/${item.name}` : item.name;
+        const childAbsolutePath = path.join(directoryPath, item.name);
+        if (item.isDirectory()) {
+          entries.push({ path: childRelativePath, name: item.name, kind: 'directory' });
+        } else if (item.isFile()) {
+          entries.push({ path: childRelativePath, name: item.name, kind: 'file', bytes: (await fs.promises.stat(childAbsolutePath)).size });
+        }
+      }
+      return { success: true, data: entries };
+    } catch (error: unknown) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  registerWorkingDirectoryFileInfoHandler({ gitService, workingDirectoryPath: workingDirectoryPathAsync });
+  registerWorkingDirectoryFileCreationHandler({ gitService, workingDirectoryPath: workingDirectoryPathAsync, ensureWriteAllowed });
+  registerWorkingDirectoryToolsHandlers({ gitService, workingDirectoryPath: workingDirectoryPathAsync, ensureWriteAllowed });
+  registerWorkingDirectoryPreviewHandler(gitService, workingDirectoryPathAsync);
+  registerRepositoryFileViewerHandlers(gitService, ensureWriteAllowed);
+  registerGitLfsHandlers(gitService, ensureWriteAllowed);
+
+  const mutateWorkingDirectory =
+    (operation: 'move' | 'copy') =>
+    async (_event: unknown, params: { sourcePath?: unknown; targetPath?: unknown; overwrite?: unknown } = {}, requestedRepoPath?: unknown) => {
+      try {
+        const repoPath = requireActiveRepositoryPath(
+          requestedRepoPath,
+          gitService.getRepoPath(),
+          operation === 'move' ? IpcChannel.GitMoveWorkingDirectoryEntry : IpcChannel.GitCopyWorkingDirectoryEntry,
+        );
+        ensureWriteAllowed(repoPath);
+        return await withWorkingDirectoryWrite(gitService, repoPath, `Working-directory ${operation}`, ensureWriteAllowed, async (ensureContext) => {
+          const sourcePath = await workingDirectoryPathAsync(repoPath, params.sourcePath, 'Source path');
+          const targetPath = await workingDirectoryPathAsync(repoPath, params.targetPath, 'Target path', true);
+          if (sourcePath === targetPath || targetPath.startsWith(`${sourcePath}${path.sep}`)) throw new Error('A directory cannot be placed inside itself.');
+          if (!(await pathExists(path.dirname(targetPath)))) throw new Error('Target folder does not exist.');
+          ensureContext();
+          const overwrite = params.overwrite === true;
+          if (operation === 'move') {
+            let backupPath: string | null = null;
+            let retainBackup = false;
+            if (await pathExists(targetPath)) {
+              if (!overwrite) return { success: false, error: 'Target already exists.' };
+              backupPath = createSiblingTemporaryPath(targetPath, 'backup');
+              ensureContext();
+              await fs.promises.rename(targetPath, backupPath);
+            }
+            try {
+              ensureContext();
+              await fs.promises.rename(sourcePath, targetPath);
+            } catch (error) {
+              retainBackup = !(await restoreReplacedTarget(targetPath, backupPath));
+              throw error;
+            } finally {
+              if (!retainBackup && backupPath) await fs.promises.rm(backupPath, { recursive: true, force: true });
+            }
+          } else {
+            const temporaryTargetPath = createSiblingTemporaryPath(targetPath, 'copy');
+            try {
+              await fs.promises.cp(sourcePath, temporaryTargetPath, { recursive: true, errorOnExist: true, force: false });
+              // Revalidate the create boundary and repository after a long copy.
+              await workingDirectoryPathAsync(repoPath, params.targetPath, 'Target path', true);
+              await publishReplacement(temporaryTargetPath, targetPath, overwrite, ensureContext);
+            } finally {
+              await fs.promises.rm(temporaryTargetPath, { recursive: true, force: true });
+            }
+          }
+          return { success: true, targetPath: String(params.targetPath) };
+        });
+      } catch (error: unknown) {
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    };
+  ipcMain.handle(IpcChannel.GitMoveWorkingDirectoryEntry, mutateWorkingDirectory('move'));
+  ipcMain.handle(IpcChannel.GitCopyWorkingDirectoryEntry, mutateWorkingDirectory('copy'));
+  ipcMain.handle(IpcChannel.GitDeleteWorkingDirectoryEntry, async (_event: unknown, filePath: unknown, requestedRepoPath?: unknown) => {
+    try {
+      const repoPath = requireActiveRepositoryPath(requestedRepoPath, gitService.getRepoPath(), IpcChannel.GitDeleteWorkingDirectoryEntry);
+      ensureWriteAllowed(repoPath);
+      await withWorkingDirectoryWrite(gitService, repoPath, IpcChannel.GitDeleteWorkingDirectoryEntry, ensureWriteAllowed, async (ensureContext) => {
+        const targetPath = await workingDirectoryPathAsync(repoPath, filePath, 'File path');
+        ensureContext();
+        await fs.promises.rm(targetPath, { recursive: true, force: false });
+      });
+      return { success: true };
+    } catch (error: unknown) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+  ipcMain.handle(IpcChannel.GitReadRepoFile, async (_event: unknown, filePath: unknown, requestedRepoPath?: unknown) => {
+    try {
+      const repositoryFilePath = asRepositoryFilePath(filePath);
+      if (repositoryFilePath.length === 0) {
+        return { success: false, error: 'File path is required' };
+      }
+
+      const repoPath = requireActiveRepositoryPath(requestedRepoPath, gitService.getRepoPath(), IpcChannel.GitReadRepoFile);
+      const data = await gitService.files.readRepoFileAtPath(repoPath, repositoryFilePath);
+      return { success: true, data };
+    } catch (error: unknown) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  ipcMain.handle(
+    IpcChannel.GitMarkdownPreviewFile,
+    async (_event: unknown, params: { source?: unknown; path?: unknown; commitHash?: unknown; repoPath?: unknown } = {}) => {
+      try {
+        const source = normalizeRepositoryFileSource(params.source);
+        const filePath = asRepositoryFilePath(params.path);
+        if (filePath.length === 0) {
+          return { success: false, error: 'File path is required' };
+        }
+
+        const repoPath = requireActiveRepositoryPath(params.repoPath, gitService.getRepoPath(), IpcChannel.GitMarkdownPreviewFile);
+        const text = await gitService.files.readRepositoryFileTextAtSourceAndPath(
+          repoPath,
+          source,
+          filePath,
+          typeof params.commitHash === 'string' ? params.commitHash : undefined,
+        );
+        return { success: true, data: { text } };
+      } catch (error: unknown) {
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannel.GitRepoFileDataUrl,
+    async (_event: unknown, params: { source?: unknown; path?: unknown; commitHash?: unknown; repoPath?: unknown } = {}) => {
+      try {
+        const source = normalizeRepositoryFileSource(params.source);
+        const filePath = asRepositoryFilePath(params.path);
+        if (filePath.length === 0) {
+          return { success: false, error: 'File path is required' };
+        }
+
+        const repoPath = requireActiveRepositoryPath(params.repoPath, gitService.getRepoPath(), IpcChannel.GitRepoFileDataUrl);
+        const data = await gitService.files.readRepositoryImageDataUrlAtSourceAndPath(
+          repoPath,
+          source,
+          filePath,
+          typeof params.commitHash === 'string' ? params.commitHash : undefined,
+        );
+        return { success: true, data };
+      } catch (error: unknown) {
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannel.GitWriteRepoFile,
+    async (_event: unknown, filePath: unknown, content: unknown, requestedRepoPath?: unknown, requestedEncoding?: unknown) => {
+      try {
+        const repositoryFilePath = asRepositoryFilePath(filePath);
+        if (repositoryFilePath.length === 0) {
+          return { success: false, error: 'File path is required' };
+        }
+
+        const repoPath = requireActiveRepositoryPath(requestedRepoPath, gitService.getRepoPath(), IpcChannel.GitWriteRepoFile);
+        ensureWriteAllowed(repoPath);
+        const encoding =
+          typeof requestedEncoding === 'string' && TEXT_ENCODINGS.has(requestedEncoding as RepositoryTextEncoding)
+            ? (requestedEncoding as RepositoryTextEncoding)
+            : undefined;
+        if (requestedEncoding != null && !encoding) return { success: false, error: 'Unsupported text encoding.' };
+        await gitService.files.writeRepoFileAtPath(repoPath, repositoryFilePath, typeof content === 'string' ? content : String(content ?? ''), encoding);
+        return { success: true };
+      } catch (error: unknown) {
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+  );
+
+  ipcMain.handle(IpcChannel.GitDeleteRepoFile, async (_event: unknown, filePath: unknown, requestedRepoPath?: unknown) => {
+    try {
+      const repositoryFilePath = asRepositoryFilePath(filePath);
+      if (repositoryFilePath.length === 0) {
+        return { success: false, error: 'File path is required' };
+      }
+
+      const repoPath = requireActiveRepositoryPath(requestedRepoPath, gitService.getRepoPath(), IpcChannel.GitDeleteRepoFile);
+      ensureWriteAllowed(repoPath);
+      await gitService.files.deleteRepoFileAtPath(repoPath, repositoryFilePath);
+      return { success: true };
+    } catch (error: unknown) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  ipcMain.handle(IpcChannel.GitOpenRepositoryPath, async (_event: unknown, params: { path?: unknown; action?: unknown; repoPath?: unknown } = {}) => {
+    try {
+      const action = String(params.action || '');
+      if (!REPOSITORY_PATH_OPEN_ACTIONS.has(action)) {
+        throw new Error('Invalid repository path action.');
+      }
+
+      const relativePath = asRepositoryFilePath(params.path);
+      let repoPath: string;
+      try {
+        repoPath = requireActiveRepositoryPath(params.repoPath, gitService.getRepoPath(), IpcChannel.GitOpenRepositoryPath);
+      } catch (authorizationError: unknown) {
+        // Opening an already registered repository folder must not switch
+        // the active workspace. Limit that inactive-repository exception to
+        // the repository root; individual files remain active-repository
+        // only and therefore cannot become a general filesystem capability.
+        const requestedRepoPath = String(params.repoPath || '').trim();
+        const storedRepoPath =
+          action === 'open' && relativePath.length === 0 && requestedRepoPath
+            ? readStoredRepoPaths().find((storedPath) => repositoryPathKey(storedPath) === repositoryPathKey(requestedRepoPath))
+            : undefined;
+        if (!storedRepoPath) throw authorizationError;
+        repoPath = storedRepoPath;
+      }
+      const targetPath = relativePath ? resolveExistingRepositoryPath(repoPath, relativePath, 'Repository path') : fs.realpathSync(repoPath);
+
+      if (action === 'reveal') {
+        shell.showItemInFolder(targetPath);
+        return { success: true };
+      }
+
+      if (action === 'openWith') {
+        await openWithSystemChooser(targetPath);
+        return { success: true };
+      }
+
+      const openError = await shell.openPath(targetPath);
+      if (openError) throw new Error(openError);
+      return { success: true };
+    } catch (error: unknown) {
+      // A file from historical commit details can legitimately be absent in
+      // the current checkout. Revealing its nearest existing parent still
+      // gives the user useful filesystem context without ever resolving an
+      // arbitrary renderer path outside the active repository.
+      if (String(params.action || '') === 'reveal' && asRepositoryFilePath(params.path)) {
+        try {
+          const repoPath = requireActiveRepositoryPath(params.repoPath, gitService.getRepoPath(), IpcChannel.GitOpenRepositoryPath);
+          const candidatePath = resolveRepositoryPathForCreate(repoPath, asRepositoryFilePath(params.path), 'Repository path');
+          const openError = await shell.openPath(findExistingParentPath(path.dirname(candidatePath)));
+          if (!openError) return { success: true };
+        } catch {
+          // Return the original error below so traversal or authorization
+          // failures are never masked by the fallback.
+        }
+      }
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  ipcMain.handle(IpcChannel.GitOpenSubmodule, async (_event: unknown, submodulePath: unknown, requestedRepoPath?: unknown) => {
+    try {
+      const relativePath = String(submodulePath || '').trim();
+      if (!relativePath) {
+        return { success: false, error: 'Submodule path is required.' };
+      }
+
+      const repoPath = requireActiveRepositoryPath(requestedRepoPath, gitService.getRepoPath(), IpcChannel.GitOpenSubmodule);
+
+      const resolvedPath = resolveExistingRepositoryPath(repoPath, relativePath, 'Submodule path');
+      // shell.openPath executes files (.exe, .bat, .lnk …); a submodule is
+      // always a directory, so never hand anything else to the shell here.
+      if (!fs.statSync(resolvedPath).isDirectory()) {
+        return { success: false, error: 'Submodule path is not a directory.' };
+      }
+
+      const openError = await shell.openPath(resolvedPath);
+      if (openError) {
+        return { success: false, error: openError };
+      }
+
+      return { success: true };
+    } catch (error: unknown) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  ipcMain.handle(IpcChannel.GitAddIgnoreRule, async (_event: unknown, pattern: string, requestedRepoPath?: unknown) => {
+    try {
+      const normalizedPattern = String(pattern || '');
+      if (!normalizedPattern.trim()) {
+        return { success: false, error: 'Pattern is required' };
+      }
+      if (normalizedPattern.length > 400) {
+        return { success: false, error: 'Pattern is too long' };
+      }
+      if (/\r|\n/.test(normalizedPattern)) {
+        return { success: false, error: 'Pattern must be a single line' };
+      }
+
+      // Pin the write to the repository the renderer requested, rejecting it if
+      // the active repository changed in the meantime, so the .gitignore edit
+      // and any follow-up unstage never target different repositories.
+      const selectedRepo = requireActiveRepositoryPath(requestedRepoPath, gitService.getRepoPath(), IpcChannel.GitAddIgnoreRule);
+
+      const repoRoot = await gitService.runCommandAtPath(selectedRepo, ['rev-parse', '--show-toplevel']);
+      // The Git command crossed an asynchronous boundary. Authorize again
+      // before any filesystem read or write so a repository switch cannot
+      // apply this operation to a repository the user has left.
+      requireActiveRepositoryPath(selectedRepo, gitService.getRepoPath(), IpcChannel.GitAddIgnoreRule);
+      ensureWriteAllowed(selectedRepo);
+      const { targetPath: gitignorePath, content: existing, mode } = readIgnoreFileSafely(repoRoot);
+      const existingRules = new Set(existing.split(/\r?\n/).filter((line) => line.length > 0));
+
+      if (existingRules.has(normalizedPattern)) {
+        return { success: true, added: false, pattern: normalizedPattern };
+      }
+
+      const needsLeadingNewline = existing.length > 0 && !existing.endsWith('\n') && !existing.endsWith('\r\n');
+      const nextContent = `${existing}${needsLeadingNewline ? '\n' : ''}${normalizedPattern}\n`;
+      replaceIgnoreFileAtomically(gitignorePath, nextContent, mode);
+      return { success: true, added: true, pattern: normalizedPattern };
+    } catch (error: unknown) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+}

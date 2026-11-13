@@ -1,0 +1,45 @@
+@layer base, shell, feature;
+
+@import './styles/base.css' layer(base);
+@import './styles/theme-palettes.css' layer(base);
+@import './styles/ui-kit.css' layer(shell);
+@import './styles/settings.css' layer(shell);
+@import './styles/system-tools.css' layer(shell);
+@import './styles/sidebar-repo.css' layer(shell);
+@import './styles/overlays.css' layer(shell);
+@import './styles/staging.css' layer(feature);
+@import './styles/staging-commit.css' layer(feature);
+@import './styles/stash-panel.css' layer(feature);
+@import './styles/github-panels.css' layer(feature);
+@import './styles/github-workspace.css' layer(feature);
+@import './styles/github-workspace-detail.css' layer(feature);
+@import './styles/local-repositories.css' layer(feature);
+@import './styles/local-repositories-sidebar.css' layer(feature);
+@import './styles/github-workspace-panels.css' layer(feature);
+@import './styles/conflict-resolver.css' layer(feature);
+@import './styles/recovery-center.css' layer(feature);
+
+.data-placeholder {
+  padding: 24px;
+  display: grid;
+  gap: 14px;
+  width: 100%;
+  box-sizing: border-box;
+}
+.data-placeholder__row {
+  height: 64px;
+  border-radius: 10px;
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 6%, transparent);
+}
+.data-placeholder__row:first-child {
+  width: 62%;
+  height: 28px;
+  margin-bottom: 10px;
+}
+
+.data-refresh-error {
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 8px 16px;
+}

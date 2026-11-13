@@ -1,0 +1,117 @@
+import type { AppSettings } from '../../settings';
+import type { AiConnectionResult, AiConnectionTestRequest, AiModelListRequest, AiProvider, AiTextRequest } from './AiProvider';
+import { AI_DISCOVERY_TIMEOUT_MS, fetchJsonWithTimeout, fetchWithTimeout, safeString, uniqueSorted } from './providerUtils';
+
+const GEMINI_API_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
+
+// The key travels in a header, never in the URL, where it could end up in
+// proxy logs, error messages or diagnostics.
+const geminiHeaders = (apiKey: string, headers: Record<string, string> = {}): Record<string, string> => ({ ...headers, 'x-goog-api-key': apiKey });
+
+export function normalizeGeminiModel(model: string): string {
+  const trimmed = model.trim();
+  if (!trimmed) return '';
+  return trimmed.startsWith('models/') ? trimmed.slice('models/'.length) : trimmed;
+}
+
+export class GeminiProvider implements AiProvider {
+  readonly id = 'gemini' as const;
+
+  getSelectedModel(settings: AppSettings): string {
+    return normalizeGeminiModel(settings.geminiModel);
+  }
+
+  async testConnection({ settings, getGeminiApiKey }: AiConnectionTestRequest): Promise<AiConnectionResult> {
+    const apiKey = getGeminiApiKey().trim();
+    if (!apiKey) {
+      throw new Error('Gemini API key fehlt.');
+    }
+
+    const model = this.getSelectedModel(settings);
+    if (!model) {
+      throw new Error('Gemini Modell fehlt.');
+    }
+
+    const data = await fetchJsonWithTimeout<{ supportedGenerationMethods?: unknown }>(
+      `${GEMINI_API_BASE_URL}/models/${encodeURIComponent(model)}`,
+      { headers: geminiHeaders(apiKey) },
+      AI_DISCOVERY_TIMEOUT_MS,
+      'Gemini nicht erreichbar',
+    );
+    const methods = Array.isArray(data.supportedGenerationMethods) ? data.supportedGenerationMethods : [];
+    if (!methods.includes('generateContent')) {
+      throw new Error(`Gemini Modell "${model}" unterstuetzt keine Textgenerierung.`);
+    }
+
+    return { ok: true, provider: this.id, model, detail: 'Gemini API erreichbar' };
+  }
+
+  async listModels({ getGeminiApiKey }: AiModelListRequest): Promise<string[]> {
+    const apiKey = getGeminiApiKey().trim();
+    if (!apiKey) {
+      throw new Error('Gemini API key fehlt.');
+    }
+
+    const data = await fetchJsonWithTimeout<{ models?: Array<{ name?: unknown; supportedGenerationMethods?: unknown }> }>(
+      `${GEMINI_API_BASE_URL}/models`,
+      { headers: geminiHeaders(apiKey) },
+      AI_DISCOVERY_TIMEOUT_MS,
+      'Gemini Modelle konnten nicht geladen werden',
+    );
+    const models = Array.isArray(data.models) ? data.models : [];
+    return uniqueSorted(
+      models
+        .filter((model) => {
+          const methods = Array.isArray(model.supportedGenerationMethods) ? model.supportedGenerationMethods : [];
+          return methods.includes('generateContent');
+        })
+        .map((model) => normalizeGeminiModel(safeString(model.name)))
+        .filter(Boolean),
+    );
+  }
+
+  async generateText({ settings, systemPrompt, userPrompt, getGeminiApiKey, shouldCancel, timeoutMs }: AiTextRequest): Promise<string> {
+    const apiKey = getGeminiApiKey().trim();
+    if (!apiKey) {
+      throw new Error('Gemini API key fehlt.');
+    }
+
+    const model = this.getSelectedModel(settings);
+    if (!model) {
+      throw new Error('Gemini Modell fehlt.');
+    }
+
+    const response = await fetchWithTimeout(
+      `${GEMINI_API_BASE_URL}/models/${encodeURIComponent(model)}:generateContent`,
+      {
+        method: 'POST',
+        headers: geminiHeaders(apiKey, { 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+          generationConfig: { temperature: 0.1 },
+        }),
+      },
+      timeoutMs,
+      shouldCancel,
+      async (response) => {
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`Gemini Anfrage fehlgeschlagen (${response.status}): ${text || response.statusText}`);
+        }
+
+        return response.json();
+      },
+    );
+
+    const data = response as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }>;
+    };
+
+    const parts = data.candidates?.[0]?.content?.parts || [];
+    return parts
+      .map((part) => safeString(part.text))
+      .join('')
+      .trim();
+  }
+}

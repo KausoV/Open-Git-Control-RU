@@ -1,0 +1,129 @@
+import type { GitCommandName } from '../shared/ipc/gitCommands';
+import type { IpcResult } from './ipc';
+import type { SecretScanSourceDto, SecretScanStrictnessDto } from './appDtos';
+import type { SecretScanPushScopeDto } from './secretScan';
+
+export type GitCommandNameDto = GitCommandName;
+export type GitCommandResultDto = IpcResult<string>;
+
+export interface GitStashEntryDto {
+  index: number;
+  name: string;
+  hash: string;
+  branch: string;
+  subject: string;
+}
+
+export interface SecretScanFindingDto {
+  id: string;
+  ruleId: string;
+  severity: 'medium' | 'high' | 'critical';
+  source: SecretScanSourceDto;
+  filePath: string;
+  lineNumber: number;
+  contextLine: string;
+}
+
+export interface SecretScanResultDto {
+  scanned: boolean;
+  strictness: SecretScanStrictnessDto;
+  findings: SecretScanFindingDto[];
+  notes: string[];
+  /** True when at least one requested push source could not be fully inspected. */
+  historyScanIncomplete?: boolean;
+  pushScope?: SecretScanPushScopeDto;
+  stats: {
+    checkedLines: number;
+    stagedLines: number;
+    toPushLines: number;
+    tagLines: number;
+  };
+}
+
+export type CommitStatsStateDto = 'missing' | 'queued' | 'loading' | 'ready' | 'error';
+
+export interface CommitStatsDto {
+  files: number;
+  additions: number;
+  deletions: number;
+}
+
+export interface CommitLogPageDto {
+  raw: string;
+  hasMore: boolean;
+  stats: Record<string, CommitStatsDto>;
+  repoPath: string;
+  /** Current decorations for all ref tips, including HEAD outside this page. */
+  refs?: Record<string, string[]>;
+}
+
+export interface CommitStatsUpdateDto {
+  repoPath: string;
+  hash: string;
+  stats: CommitStatsDto | null;
+  state: 'loading' | 'ready' | 'error';
+}
+
+export interface WorkingTreeSnapshotDto {
+  snapshotId: string;
+  repoPath: string;
+  statusRaw: string;
+  changeCount: number;
+  durationMs: number;
+  largeMode: boolean;
+  isBare: boolean;
+}
+
+export interface RepositoryChangeSummaryDto {
+  repoPath: string;
+  changeCount: number;
+  checkedAt: number;
+  /** Hash of the porcelain status, independent of the check time. Older previews may omit it. */
+  statusFingerprint?: string;
+}
+
+export interface WorkingTreeStatsDto {
+  snapshotId: string;
+  staged: CommitStatsDto;
+  unstaged: CommitStatsDto;
+}
+
+export type GitSequencerOperationDto = 'merge' | 'rebase' | 'cherry-pick';
+
+export interface GitSequencerStateDto {
+  operation: GitSequencerOperationDto | null;
+}
+
+export interface DiffPreviewDto {
+  text: string;
+  truncated: boolean;
+  bytes: number;
+  lines: number;
+}
+
+export type RepositoryFileSourceDto = 'unstaged' | 'staged' | 'commit';
+
+export interface MarkdownPreviewFileDto {
+  text: string;
+}
+
+export interface RepoFileDataUrlDto {
+  dataUrl: string;
+  mimeType: string;
+  bytes: number;
+}
+
+export type FileTimelineChangeDto = {
+  status: 'added' | 'modified' | 'deleted' | 'renamed';
+  path: string;
+  oldPath?: string;
+};
+
+export type FileTimelineCommitDto = {
+  hash: string;
+  author: string;
+  date: string;
+  subject: string;
+  changes: FileTimelineChangeDto[];
+  baselineFiles?: string[];
+};

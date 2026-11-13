@@ -1,0 +1,682 @@
+import { repositorySecretScanAllowlistClient } from '@/services/repositorySecretScanAllowlistClient';
+import { JSDOM } from 'jsdom';
+import { createElement } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { act } from 'react-dom/test-utils';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ConfirmDialogState } from '@/components/layout/layoutTypes';
+import { useGitCommandGuardWorkflow } from '@/components/layout/workflows/useGitCommandGuardWorkflow';
+import { useGitCommandWorkflow } from '@/components/layout/workflows/useGitCommandWorkflow';
+import { type GitCommandRunner, useGitSyncRecoveryWorkflow } from '@/components/layout/workflows/useGitSyncRecoveryWorkflow';
+import { useInitialCommitRecoveryWorkflow } from '@/components/layout/workflows/useInitialCommitRecoveryWorkflow';
+import { useRepoUnavailableWorkflow } from '@/components/layout/workflows/useRepoUnavailableWorkflow';
+import { useRemoteRecoveryWorkflow } from '@/components/layout/workflows/useRemoteRecoveryWorkflow';
+import { gitClient } from '@/services/gitClient';
+import { useRemoteTransferDialogState } from '@/components/hosting/remoteTransferDialogState';
+import { plannerClient } from '@/services/plannerClient';
+import { appClient } from '@/services/appClient';
+
+type HookRender<T> = {
+  readonly current: T;
+  unmount: () => void;
+};
+
+const renderHook = <T>(useHook: () => T): HookRender<T> => {
+  let current: T | undefined;
+  const container = document.createElement('div');
+  const root: Root = createRoot(container);
+
+  const TestComponent = () => {
+    current = useHook();
+    return null;
+  };
+
+  act(() => {
+    root.render(createElement(TestComponent));
+  });
+
+  return {
+    get current() {
+      if (current === undefined) {
+        throw new Error('Hook did not render.');
+      }
+      return current;
+    },
+    unmount: () => {
+      act(() => {
+        root.unmount();
+      });
+    },
+  };
+};
+
+beforeEach(() => {
+  vi.spyOn(gitClient, 'ensureCommitIdentity').mockResolvedValue(true);
+  const dom = new JSDOM('<!doctype html><html><body></body></html>');
+  vi.stubGlobal('window', dom.window);
+  vi.stubGlobal('document', dom.window.document);
+  vi.stubGlobal('navigator', dom.window.navigator);
+  (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+describe('workflow hooks', () => {
+  it('keeps origin unchanged and requires confirmation before opening 404 recovery', async () => {
+    const removeRemote = vi.spyOn(gitClient, 'removeRemote').mockResolvedValue({ success: true, data: '' });
+    const setActiveTab = vi.fn();
+    const setConfirmDialog = vi.fn();
+    const workspace = {
+      activeRepo: 'C:\\repos\\demo',
+      addOpenRepo: vi.fn().mockResolvedValue(undefined),
+      setActiveRepo: vi.fn(),
+      setActiveTab,
+    };
+    const hook = renderHook(() =>
+      useRemoteRecoveryWorkflow({
+        workspace,
+        settings: { defaultBranch: 'main', language: 'en' },
+        triggerRefresh: vi.fn(),
+        setConfirmDialog,
+        setGitActionToast: vi.fn(),
+      }),
+    );
+
+    let handled = false;
+    await act(async () => {
+      handled = await hook.current.maybeRecoverRemoteSetup({
+        command: 'fetch',
+        failureMessage: "fatal: unable to access 'https://github.com/acme/demo.git/': The requested URL returned error: 404",
+      });
+    });
+
+    expect(handled).toBe(true);
+    expect(removeRemote).not.toHaveBeenCalled();
+    expect(useRemoteTransferDialogState.getState().dialog).toBeNull();
+    expect(setActiveTab).not.toHaveBeenCalled();
+    const dialog = setConfirmDialog.mock.calls[0]?.[0] as ConfirmDialogState;
+    expect(dialog).toEqual(
+      expect.objectContaining({
+        variant: 'confirm',
+        irreversible: false,
+        onConfirm: expect.any(Function),
+      }),
+    );
+
+    await act(async () => {
+      await dialog.onConfirm?.();
+    });
+
+    expect(removeRemote).not.toHaveBeenCalled();
+    expect(useRemoteTransferDialogState.getState().dialog).toEqual({ repoPath: workspace.activeRepo, mode: 'remotes' });
+    expect(setActiveTab).toHaveBeenCalledWith('repo');
+    hook.unmount();
+  });
+
+  it('fuehrt den Remote-ahead-Quick-Fix als stash, pull --rebase und stash pop aus', async () => {
+    const runGitCommand = vi.fn<GitCommandRunner>().mockResolvedValue(true);
+    const setGitActionToast = vi.fn();
+    const hook = renderHook(() =>
+      useGitSyncRecoveryWorkflow({
+        runGitCommandRef: { current: runGitCommand },
+        setActiveTab: vi.fn(),
+        setConfirmDialog: vi.fn(),
+        setGitActionToast,
+        language: 'de',
+      }),
+    );
+
+    await act(async () => {
+      await hook.current.runRemoteAheadQuickFix({ command: 'push' });
+    });
+
+    expect(runGitCommand).toHaveBeenNthCalledWith(
+      1,
+      ['stash', 'push', '-u', '-m', 'Open Git Control quick sync fix'],
+      expect.any(String),
+      expect.any(String),
+      expect.objectContaining({ skipDirtyGuard: true, skipSyncMismatchRecovery: true }),
+    );
+    expect(runGitCommand).toHaveBeenNthCalledWith(
+      2,
+      ['pull', '--rebase'],
+      expect.any(String),
+      expect.any(String),
+      expect.objectContaining({ skipRemoteAheadDirtyGuard: true, skipSecretScan: true }),
+      true,
+    );
+    expect(runGitCommand).toHaveBeenNthCalledWith(
+      3,
+      ['stash', 'pop'],
+      expect.any(String),
+      expect.any(String),
+      expect.objectContaining({ skipSecretScan: true }),
+      true,
+    );
+    expect(setGitActionToast).toHaveBeenCalledWith(expect.objectContaining({ isError: false }));
+
+    hook.unmount();
+  });
+
+  it('fuehrt Autostash-Pull als stash, pull und stash pop mit Continuation aus', async () => {
+    const runGitCommand = vi.fn<GitCommandRunner>().mockResolvedValue(true);
+    const setConfirmDialog = vi.fn();
+    const setGitActionToast = vi.fn();
+    const hook = renderHook(() =>
+      useGitSyncRecoveryWorkflow({
+        runGitCommandRef: { current: runGitCommand },
+        setActiveTab: vi.fn(),
+        setConfirmDialog,
+        setGitActionToast,
+        language: 'de',
+      }),
+    );
+
+    const handled = hook.current.maybeHandleSyncMismatchFailure({
+      command: 'pull',
+      failureMessage: 'Please commit your changes or stash them before you merge.',
+      args: ['pull', '--rebase'],
+      successMsg: 'pulled',
+      actionLabel: 'Pull...',
+    });
+    expect(handled).toBe(true);
+
+    const dialog = setConfirmDialog.mock.calls[0]?.[0] as ConfirmDialogState;
+    await act(async () => {
+      await dialog.onConfirm?.();
+    });
+
+    expect(runGitCommand).toHaveBeenNthCalledWith(
+      1,
+      ['stash', 'push', '-u', '-m', 'Open Git Control autostash before pull: git pull --rebase'],
+      expect.any(String),
+      expect.any(String),
+      expect.objectContaining({ skipDirtyGuard: true, skipSyncMismatchRecovery: true }),
+    );
+    expect(runGitCommand).toHaveBeenNthCalledWith(2, ['pull', '--rebase'], 'pulled', 'Pull...', expect.objectContaining({ skipSecretScan: true }), true);
+    expect(runGitCommand).toHaveBeenNthCalledWith(
+      3,
+      ['stash', 'pop'],
+      expect.any(String),
+      expect.any(String),
+      expect.objectContaining({ skipSecretScan: true }),
+      true,
+    );
+    expect(setGitActionToast).toHaveBeenCalledWith(expect.objectContaining({ isError: false }));
+
+    hook.unmount();
+  });
+
+  it('gibt den Git-Workflow-Lock nach einem Befehl wieder frei', async () => {
+    vi.spyOn(gitClient, 'isAvailable').mockReturnValue(true);
+    const runGitCommandSpy = vi.spyOn(gitClient, 'runGitCommandForRepo').mockResolvedValue({ success: true, data: '' });
+    const setGitActionToast = vi.fn();
+    const workspace = {
+      activeRepo: 'C:\\repos\\demo',
+      addOpenRepo: vi.fn().mockResolvedValue(undefined),
+      setActiveRepo: vi.fn(),
+      setActiveTab: vi.fn(),
+    };
+
+    const hook = renderHook(() =>
+      useGitCommandWorkflow({
+        workspace,
+        settings: {
+          confirmDangerousOps: false,
+          defaultBranch: 'main',
+          language: 'en',
+          secretScanBeforePushEnabled: false,
+          secretScanAllowlist: '',
+        },
+        onUpdateSettings: vi.fn().mockResolvedValue(undefined),
+        triggerRefresh: vi.fn(),
+        setConfirmDialog: vi.fn(),
+        setGitActionToast,
+        setConflictResolverPath: vi.fn(),
+      }),
+    );
+
+    let first = false;
+    let second = false;
+    await act(async () => {
+      first = await hook.current.runGitCommand(['fetch', '--all', '--prune', '--tags'], 'fetched');
+    });
+    await act(async () => {
+      second = await hook.current.runGitCommand(['fetch', '--all', '--prune', '--tags'], 'fetched again');
+    });
+
+    expect(first).toBe(true);
+    expect(second).toBe(true);
+    expect(runGitCommandSpy).toHaveBeenCalledTimes(2);
+    expect(hook.current.isGitActionRunning).toBe(false);
+    expect(hook.current.isGitActionRunningRef.current).toBe(false);
+
+    hook.unmount();
+  });
+
+  it('shows an actionable in-app dialog for a GitHub Push Protection rejection', async () => {
+    const githubPushProtectionError = `remote: error: GH013: Repository rule violations found
+remote: - GITHUB PUSH PROTECTION
+remote:       —— OpenRouter API Key ———————————
+remote:          - commit: e9ca6793dddfbc8cd8b38cf228ef8ef2a24a6604
+remote:            path: tests/secret.test.ts:35
+remote: https://github.com/acme/repo/security/secret-scanning/unblock-secret/token`;
+    vi.spyOn(gitClient, 'isAvailable').mockReturnValue(true);
+    vi.spyOn(gitClient, 'runGitCommandForRepo').mockResolvedValue({ success: false, error: githubPushProtectionError });
+    vi.spyOn(appClient, 'isAvailable').mockReturnValue(true);
+    const openExternalUrl = vi.spyOn(appClient, 'openExternalUrl').mockResolvedValue(undefined as never);
+    const setConfirmDialog = vi.fn();
+    const setGitActionToast = vi.fn();
+    const hook = renderHook(() =>
+      useGitCommandWorkflow({
+        workspace: { activeRepo: 'C:/repo', addOpenRepo: vi.fn(), setActiveRepo: vi.fn(), setActiveTab: vi.fn() },
+        settings: { confirmDangerousOps: false, defaultBranch: 'main', language: 'en', secretScanBeforePushEnabled: false, secretScanAllowlist: '' },
+        onUpdateSettings: vi.fn(),
+        triggerRefresh: vi.fn(),
+        setConfirmDialog,
+        setGitActionToast,
+        setConflictResolverPath: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await hook.current.runGitCommand(['push'], 'pushed');
+    });
+
+    const dialog = setConfirmDialog.mock.calls[0]?.[0] as ConfirmDialogState;
+    expect(dialog).toEqual(expect.objectContaining({ title: 'GitHub blocked this push because of a secret', confirmLabel: 'Open GitHub unblock page' }));
+    expect(dialog.contextItems).toEqual(expect.arrayContaining([expect.objectContaining({ value: 'OpenRouter API Key' })]));
+    expect(setGitActionToast).not.toHaveBeenCalledWith(expect.objectContaining({ msg: githubPushProtectionError }));
+    await act(async () => {
+      await dialog.onConfirm();
+    });
+    expect(openExternalUrl).toHaveBeenCalledWith('https://github.com/acme/repo/security/secret-scanning/unblock-secret/token');
+    hook.unmount();
+  });
+
+  it('oeffnet bei pull-blocked-by-local-changes einen Autostash-Dialog', () => {
+    const setActiveTab = vi.fn();
+    const setConfirmDialog = vi.fn();
+    const hook = renderHook(() =>
+      useGitSyncRecoveryWorkflow({
+        runGitCommandRef: { current: vi.fn<GitCommandRunner>() },
+        setActiveTab,
+        setConfirmDialog,
+        setGitActionToast: vi.fn(),
+        language: 'de',
+      }),
+    );
+
+    const handled = hook.current.maybeHandleSyncMismatchFailure({
+      command: 'pull',
+      failureMessage: 'Please commit your changes or stash them before you merge.',
+      args: ['pull'],
+      successMsg: 'ok',
+    });
+
+    expect(handled).toBe(true);
+    expect(setActiveTab).toHaveBeenCalledWith('repo');
+    expect(setConfirmDialog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        variant: 'danger',
+        confirmLabel: expect.any(String),
+        onConfirm: expect.any(Function),
+      }),
+    );
+
+    hook.unmount();
+  });
+
+  it('blockiert Force-Push per Guard und bestaetigt danach mit skipDirtyGuard', async () => {
+    const runGitCommand = vi.fn<GitCommandRunner>().mockResolvedValue(true);
+    const setConfirmDialog = vi.fn();
+    const hook = renderHook(() =>
+      useGitCommandGuardWorkflow({
+        runGitCommandRef: { current: runGitCommand },
+        runRemoteAheadQuickFix: vi.fn(),
+        settings: {
+          confirmDangerousOps: true,
+          language: 'de',
+          secretScanBeforePushEnabled: false,
+          secretScanAllowlist: '',
+        },
+        onUpdateSettings: vi.fn().mockResolvedValue(undefined),
+        setConfirmDialog,
+        setGitActionToast: vi.fn(),
+      }),
+    );
+
+    const guarded = await hook.current.runGitCommandGuards({
+      args: ['push', '--force'],
+      command: 'push',
+      successMsg: 'pushed',
+    });
+
+    expect(guarded).toBe(true);
+    const dialog = setConfirmDialog.mock.calls[0]?.[0] as ConfirmDialogState;
+    expect(dialog).toEqual(
+      expect.objectContaining({
+        variant: 'danger',
+        irreversible: true,
+        onConfirm: expect.any(Function),
+      }),
+    );
+
+    await act(async () => {
+      await dialog.onConfirm?.();
+    });
+
+    expect(runGitCommand).toHaveBeenCalledWith(['push', '--force'], 'pushed', undefined, expect.objectContaining({ skipDirtyGuard: true }));
+
+    hook.unmount();
+  });
+
+  it('continues no push when the allowlist update is not persisted', async () => {
+    vi.spyOn(gitClient, 'scanPushSecrets').mockResolvedValue({
+      success: true,
+      data: {
+        scanned: true,
+        strictness: 'medium',
+        findings: [
+          {
+            id: 'finding-1',
+            ruleId: 'secret',
+            severity: 'high',
+            source: 'to-push',
+            filePath: '.env',
+            lineNumber: 1,
+            contextLine: '[REDACTED_SECRET]',
+          },
+        ],
+        notes: [],
+        stats: { checkedLines: 1, stagedLines: 0, toPushLines: 1, tagLines: 0 },
+      },
+    });
+    const approve = vi.spyOn(gitClient, 'approveSecretScanPush').mockResolvedValue({ success: true });
+    vi.spyOn(appClient, 'isAvailable').mockReturnValue(true);
+    vi.spyOn(repositorySecretScanAllowlistClient, 'get').mockResolvedValue({
+      success: true,
+      data: { repoPath: 'C:/repo', relativePath: '', text: '', version: 'missing', exists: false },
+    });
+    const save = vi.spyOn(repositorySecretScanAllowlistClient, 'addPaths').mockResolvedValue({ success: false, error: 'Could not save allowlist.' });
+    const runGitCommand = vi.fn<GitCommandRunner>().mockResolvedValue(true);
+    const setConfirmDialog = vi.fn();
+    const setGitActionToast = vi.fn();
+    const onUpdateSettings = vi.fn().mockResolvedValue(undefined);
+    const hook = renderHook(() =>
+      useGitCommandGuardWorkflow({
+        runGitCommandRef: { current: runGitCommand },
+        runRemoteAheadQuickFix: vi.fn(),
+        settings: {
+          confirmDangerousOps: false,
+          language: 'en',
+          secretScanBeforePushEnabled: true,
+          secretScanAllowlist: '',
+        },
+        onUpdateSettings,
+        setConfirmDialog,
+        setGitActionToast,
+      }),
+    );
+
+    await act(async () => {
+      await hook.current.runGitCommandGuards({
+        args: ['push', 'origin', 'main'],
+        command: 'push',
+        repoPath: 'C:/repo',
+        successMsg: 'pushed',
+        options: { skipRemoteAheadDirtyGuard: true },
+      });
+    });
+
+    const dialog = setConfirmDialog.mock.calls[0]?.[0] as ConfirmDialogState;
+    await act(async () => {
+      await dialog.onSecondaryAction?.();
+    });
+
+    expect(onUpdateSettings).not.toHaveBeenCalled();
+    expect(save).toHaveBeenCalledWith({ repoPath: 'C:/repo', paths: ['.env'], expectedVersion: 'missing' });
+    expect(approve).not.toHaveBeenCalled();
+    expect(runGitCommand).not.toHaveBeenCalled();
+    expect(setGitActionToast).toHaveBeenCalledWith(expect.objectContaining({ isError: true }));
+    hook.unmount();
+  });
+
+  it('fragt vor automatischem Initial-Commit nach, wenn lokale Aenderungen vorhanden sind', async () => {
+    vi.spyOn(gitClient, 'isAvailable').mockReturnValue(true);
+    vi.spyOn(gitClient, 'runGitCommandForRepo').mockResolvedValue({ success: true, data: '?? README.md\n M src/app.ts' });
+    const setActiveTab = vi.fn();
+    const setConfirmDialog = vi.fn();
+    const hook = renderHook(() =>
+      useInitialCommitRecoveryWorkflow({
+        getActiveRepo: () => 'C:\\repos\\demo',
+        recoverBareRepoForPush: vi.fn().mockResolvedValue(false),
+        setActiveTab,
+        setConfirmDialog,
+        setGitActionToast: vi.fn(),
+        language: 'de',
+      }),
+    );
+
+    const opened = await hook.current.requestInitialCommitConfirmationIfNeeded({
+      commandLabel: 'git push',
+      confirmLabel: 'Committen',
+      onConfirm: vi.fn(),
+    });
+
+    expect(opened).toBe(true);
+    expect(setActiveTab).toHaveBeenCalledWith('repo');
+    expect(setConfirmDialog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        variant: 'danger',
+        confirmLabel: 'Committen',
+        onConfirm: expect.any(Function),
+      }),
+    );
+
+    hook.unmount();
+  });
+
+  it('raeumt ein nicht mehr verfuegbares Repository samt Planungsdaten auf', async () => {
+    let repoUnavailableListener: ((payload: { repoPath: string; command: string; error: string }) => void) | undefined;
+    const unsubscribe = vi.fn();
+    vi.spyOn(gitClient, 'isAvailable').mockReturnValue(true);
+    vi.spyOn(gitClient, 'onRepoUnavailable').mockImplementation((callback) => {
+      repoUnavailableListener = callback;
+      return unsubscribe;
+    });
+    vi.spyOn(plannerClient, 'isAvailable').mockReturnValue(true);
+    vi.spyOn(plannerClient, 'deleteRepositoryProjectByPath').mockResolvedValue({
+      success: true,
+      data: { deletedItemCount: 2, deletedProjectCount: 1 },
+    });
+
+    const handleCloseRepo = vi.fn().mockResolvedValue(undefined);
+    const setPlannerRefreshSignal = vi.fn();
+    const setConfirmDialog = vi.fn();
+    const setGitActionToast = vi.fn();
+    const hook = renderHook(() =>
+      useRepoUnavailableWorkflow({
+        handleRecoverRepo: vi.fn().mockResolvedValue(false),
+        activeRepo: 'C:\\repos\\demo',
+        handleCloseRepo,
+        setPlannerRefreshSignal,
+        setConfirmDialog,
+        setGitActionToast,
+        language: 'de',
+      }),
+    );
+
+    act(() => {
+      repoUnavailableListener?.({ repoPath: 'C:\\repos\\demo', command: 'status', error: '[REPO_UNAVAILABLE] not a git repository' });
+      repoUnavailableListener?.({ repoPath: 'C:\\repos\\demo', command: 'status', error: '[REPO_UNAVAILABLE] repeated' });
+    });
+
+    expect(setConfirmDialog).toHaveBeenCalledTimes(1);
+    const dialog = setConfirmDialog.mock.calls[0]?.[0] as ConfirmDialogState;
+    expect(dialog).toEqual(
+      expect.objectContaining({
+        variant: 'confirm',
+        confirmLabel: expect.any(String),
+        onConfirm: expect.any(Function),
+      }),
+    );
+
+    await act(async () => {
+      dialog.contextAction?.onClick();
+      await (setConfirmDialog.mock.calls.at(-1)?.[0] as ConfirmDialogState).onConfirm?.();
+    });
+
+    expect(plannerClient.deleteRepositoryProjectByPath).toHaveBeenCalledWith('C:\\repos\\demo');
+    expect(handleCloseRepo).toHaveBeenCalledWith('C:\\repos\\demo');
+    expect(setPlannerRefreshSignal).toHaveBeenCalledWith(expect.any(Function));
+    expect(setPlannerRefreshSignal.mock.calls[0][0](3)).toBe(4);
+    expect(setGitActionToast).toHaveBeenCalledWith(expect.objectContaining({ isError: false }));
+
+    hook.unmount();
+    expect(unsubscribe).toHaveBeenCalled();
+  });
+
+  it('ignoriert Repo-unavailable Events ohne aktives Repository oder Git-Client', () => {
+    let repoUnavailableListener: ((payload: { repoPath: string; command: string; error: string }) => void) | undefined;
+    vi.spyOn(gitClient, 'isAvailable').mockReturnValue(true);
+    vi.spyOn(gitClient, 'onRepoUnavailable').mockImplementation((callback) => {
+      repoUnavailableListener = callback;
+      return vi.fn();
+    });
+
+    const setConfirmDialog = vi.fn();
+    const hook = renderHook(() =>
+      useRepoUnavailableWorkflow({
+        handleRecoverRepo: vi.fn().mockResolvedValue(false),
+        activeRepo: null,
+        handleCloseRepo: vi.fn(),
+        setPlannerRefreshSignal: vi.fn(),
+        setConfirmDialog,
+        setGitActionToast: vi.fn(),
+        language: 'de',
+      }),
+    );
+
+    act(() => {
+      repoUnavailableListener?.({ repoPath: 'C:\\repos\\demo', command: 'status', error: '[REPO_UNAVAILABLE] missing' });
+    });
+
+    expect(setConfirmDialog).not.toHaveBeenCalled();
+    hook.unmount();
+
+    vi.spyOn(gitClient, 'isAvailable').mockReturnValue(false);
+    const unavailableHook = renderHook(() =>
+      useRepoUnavailableWorkflow({
+        handleRecoverRepo: vi.fn().mockResolvedValue(false),
+        activeRepo: 'C:\\repos\\demo',
+        handleCloseRepo: vi.fn(),
+        setPlannerRefreshSignal: vi.fn(),
+        setConfirmDialog,
+        setGitActionToast: vi.fn(),
+        language: 'de',
+      }),
+    );
+
+    expect(gitClient.onRepoUnavailable).toHaveBeenCalledTimes(1);
+    unavailableHook.unmount();
+  });
+
+  it('setzt den Repo-unavailable Guard bei Cancel zurueck und kann ohne Planner aufraeumen', async () => {
+    let repoUnavailableListener: ((payload: { repoPath: string; command: string; error: string }) => void) | undefined;
+    vi.spyOn(gitClient, 'isAvailable').mockReturnValue(true);
+    vi.spyOn(gitClient, 'onRepoUnavailable').mockImplementation((callback) => {
+      repoUnavailableListener = callback;
+      return vi.fn();
+    });
+    vi.spyOn(plannerClient, 'isAvailable').mockReturnValue(false);
+    const deleteRepositoryProjectByPath = vi.spyOn(plannerClient, 'deleteRepositoryProjectByPath');
+
+    const handleCloseRepo = vi.fn().mockResolvedValue(undefined);
+    const setConfirmDialog = vi.fn();
+    const setGitActionToast = vi.fn();
+    const hook = renderHook(() =>
+      useRepoUnavailableWorkflow({
+        handleRecoverRepo: vi.fn().mockResolvedValue(false),
+        activeRepo: 'C:\\repos\\demo',
+        handleCloseRepo,
+        setPlannerRefreshSignal: vi.fn(),
+        setConfirmDialog,
+        setGitActionToast,
+        language: 'de',
+      }),
+    );
+
+    act(() => {
+      repoUnavailableListener?.({ repoPath: 'C:\\repos\\demo', command: 'status', error: '[REPO_UNAVAILABLE] missing' });
+    });
+    const firstDialog = setConfirmDialog.mock.calls[0]?.[0] as ConfirmDialogState;
+    act(() => {
+      firstDialog.onCancel?.();
+      repoUnavailableListener?.({ repoPath: 'C:\\repos\\demo', command: 'status', error: '[REPO_UNAVAILABLE] still missing' });
+    });
+
+    expect(setConfirmDialog).toHaveBeenCalledTimes(2);
+    const secondDialog = setConfirmDialog.mock.calls[1]?.[0] as ConfirmDialogState;
+    await act(async () => {
+      secondDialog.contextAction?.onClick();
+      await (setConfirmDialog.mock.calls.at(-1)?.[0] as ConfirmDialogState).onConfirm?.();
+    });
+
+    expect(deleteRepositoryProjectByPath).not.toHaveBeenCalled();
+    expect(handleCloseRepo).toHaveBeenCalledWith('C:\\repos\\demo');
+    expect(setGitActionToast).toHaveBeenCalledWith(expect.objectContaining({ isError: false }));
+
+    hook.unmount();
+  });
+
+  it('meldet Planner-Cleanup-Fehler beim Repo-unavailable Aufraeumen', async () => {
+    let repoUnavailableListener: ((payload: { repoPath: string; command: string; error: string }) => void) | undefined;
+    vi.spyOn(gitClient, 'isAvailable').mockReturnValue(true);
+    vi.spyOn(gitClient, 'onRepoUnavailable').mockImplementation((callback) => {
+      repoUnavailableListener = callback;
+      return vi.fn();
+    });
+    vi.spyOn(plannerClient, 'isAvailable').mockReturnValue(true);
+    vi.spyOn(plannerClient, 'deleteRepositoryProjectByPath').mockResolvedValue({
+      success: false,
+      error: 'planner locked',
+    });
+
+    const setConfirmDialog = vi.fn();
+    const setGitActionToast = vi.fn();
+    const hook = renderHook(() =>
+      useRepoUnavailableWorkflow({
+        handleRecoverRepo: vi.fn().mockResolvedValue(false),
+        activeRepo: 'C:\\repos\\demo',
+        handleCloseRepo: vi.fn().mockResolvedValue(undefined),
+        setPlannerRefreshSignal: vi.fn(),
+        setConfirmDialog,
+        setGitActionToast,
+        language: 'de',
+      }),
+    );
+
+    act(() => {
+      repoUnavailableListener?.({ repoPath: 'C:\\repos\\demo', command: 'status', error: '[REPO_UNAVAILABLE] missing' });
+    });
+    const dialog = setConfirmDialog.mock.calls[0]?.[0] as ConfirmDialogState;
+
+    await act(async () => {
+      dialog.contextAction?.onClick();
+      await (setConfirmDialog.mock.calls.at(-1)?.[0] as ConfirmDialogState).onConfirm?.();
+    });
+
+    expect(setGitActionToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isError: true,
+        msg: expect.stringContaining('planner locked'),
+      }),
+    );
+
+    hook.unmount();
+  });
+});

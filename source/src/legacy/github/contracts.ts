@@ -1,0 +1,128 @@
+/** Internal contract retained for retired GitHub hook/cache regression fixtures. Never exposed by production preload. */
+import type { ReadRequest } from '../../shared/cache/resource';
+import type {
+  DeviceFlowPollDto,
+  DeviceFlowStartDto,
+  GitHubCreateReleaseParamsDto,
+  GitHubInspectReleaseTargetParamsDto,
+  GitHubReleaseTargetDto,
+  GitHubForkParamsDto,
+  GitHubReleaseAssetDto,
+  GitHubReleaseContextDto,
+  GitHubReleaseDto,
+  GitHubRepositoryDetailsDto,
+  GitHubRepositoryDto,
+  GitHubRepositoryPageDto,
+  GithubCatalogSnapshotDto,
+  GithubCreateRepositoryWithReadmeDto,
+  GitHubUploadReleaseAssetParamsDto,
+  GithubStatusChecksDto,
+  GithubWorkflowRunDto,
+  GithubWorkflowRunsPageDto,
+  GithubWorkflowJobsPageDto,
+  PullRequestDto,
+  PullRequestMergeMethodDto,
+} from '../../types/githubDtos';
+import type { IpcResult } from '../../types/ipc';
+
+export type CreatePullRequestParamsDto = {
+  owner: string;
+  repo: string;
+  title: string;
+  body: string;
+  head: string;
+  base: string;
+};
+
+export type CreatePullRequestResultDto = {
+  number: number;
+  title: string;
+  htmlUrl: string;
+  state: string;
+};
+
+export type WorkflowRunsRequestDto = {
+  owner: string;
+  repo: string;
+  branch?: string;
+  headSha?: string;
+  perPage?: number;
+  page?: number;
+  status?: string;
+};
+
+export type WorkflowJobsRequestDto = { owner: string; repo: string; runId: number; page?: number; perPage?: number };
+
+export type StatusChecksRequestDto = {
+  owner: string;
+  repo: string;
+  ref: string;
+};
+
+export type MergePullRequestParamsDto = {
+  owner: string;
+  repo: string;
+  pullNumber: number;
+  mergeMethod: PullRequestMergeMethodDto;
+  commitTitle?: string;
+  commitMessage?: string;
+  expectedHeadSha?: string;
+};
+
+export type MergePullRequestResultDto = {
+  sha: string;
+  merged: boolean;
+  message: string;
+};
+
+export type GithubAuthResultDto = {
+  success: boolean;
+  tokenPersisted?: boolean;
+  error?: string;
+};
+
+export interface LegacyGithubAPI {
+  githubAuth: (token: string, host?: string) => Promise<GithubAuthResultDto>;
+  githubCancelAuth: () => Promise<{ success: true }>;
+  githubDeviceStart: () => Promise<IpcResult<DeviceFlowStartDto>>;
+  githubDevicePoll: (deviceCode: string) => Promise<IpcResult<DeviceFlowPollDto & { tokenPersisted?: boolean }>>;
+  githubWebLogin: () => Promise<IpcResult<{ username: string | null; tokenPersisted?: boolean }>>;
+  githubGetRepos: (params?: { page?: number; perPage?: number; search?: string; readRequest?: ReadRequest }) => Promise<IpcResult<GitHubRepositoryPageDto>>;
+  githubGetSavedAuthStatus: () => Promise<{ hasSavedToken: boolean; authenticated: boolean; username: string | null; oauthConfigured: boolean }>;
+  githubLoginWithSavedToken: () => Promise<{
+    success: boolean;
+    authenticated: boolean;
+    authenticationRequired?: boolean;
+    username: string | null;
+    tokenPersisted?: boolean;
+    error?: string;
+  }>;
+  githubCheckAuthStatus: () => Promise<{ authenticated: boolean; username: string | null }>;
+  githubLogout: () => Promise<{ success: true } | { success: false; error: string; sessionCleared: boolean }>;
+  githubCreateRepo: (name: string, description: string, isPrivate: boolean) => Promise<IpcResult<GitHubRepositoryDto>>;
+  githubCreateRepoWithReadme: (name: string, description: string, isPrivate: boolean) => Promise<IpcResult<GithubCreateRepositoryWithReadmeDto>>;
+  githubGetCatalogSnapshot: () => Promise<IpcResult<GithubCatalogSnapshotDto | null>>;
+  githubSaveCatalogSnapshot: (repos: GitHubRepositoryDto[]) => Promise<IpcResult<{ savedAt: string }>>;
+  githubForkRepo: (params: GitHubForkParamsDto) => Promise<IpcResult<GitHubRepositoryDto>>;
+  githubGetRepository: (owner: string, repo: string) => Promise<IpcResult<GitHubRepositoryDetailsDto>>;
+  githubGetBranches: (owner: string, repo: string) => Promise<IpcResult<string[]>>;
+  githubGetBranchesPage: (owner: string, repo: string, page: number, readRequest?: ReadRequest) => Promise<IpcResult<string[]>>;
+  githubGetPRs: (owner: string, repo: string, state: string) => Promise<IpcResult<PullRequestDto[]>>;
+  githubCreatePR: (params: CreatePullRequestParamsDto) => Promise<IpcResult<CreatePullRequestResultDto>>;
+  githubCreateRelease: (params: GitHubCreateReleaseParamsDto) => Promise<IpcResult<GitHubReleaseDto>>;
+  githubInspectReleaseTarget: (params: GitHubInspectReleaseTargetParamsDto) => Promise<IpcResult<GitHubReleaseTargetDto>>;
+  githubUploadReleaseAsset: (params: GitHubUploadReleaseAssetParamsDto) => Promise<IpcResult<GitHubReleaseAssetDto>>;
+  githubGetReleaseContext: (params: {
+    owner: string;
+    repo: string;
+    targetCommitish?: string;
+    repoPath?: string;
+  }) => Promise<IpcResult<GitHubReleaseContextDto>>;
+  githubGetWorkflowRuns: (params: WorkflowRunsRequestDto) => Promise<IpcResult<GithubWorkflowRunDto[]>>;
+  githubGetWorkflowRunsPage: (params: WorkflowRunsRequestDto) => Promise<IpcResult<GithubWorkflowRunsPageDto>>;
+  githubGetWorkflowJobsPage: (params: WorkflowJobsRequestDto) => Promise<IpcResult<GithubWorkflowJobsPageDto>>;
+  githubRerunFailedJobs: (owner: string, repo: string, runId: number) => Promise<IpcResult<true>>;
+  githubCancelWorkflowRun: (owner: string, repo: string, runId: number) => Promise<IpcResult<true>>;
+  githubGetStatusChecks: (params: StatusChecksRequestDto) => Promise<IpcResult<GithubStatusChecksDto>>;
+  githubMergePR: (params: MergePullRequestParamsDto) => Promise<IpcResult<MergePullRequestResultDto>>;
+}

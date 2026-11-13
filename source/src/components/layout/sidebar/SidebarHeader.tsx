@@ -1,0 +1,41 @@
+﻿import React from 'react';
+import { RefreshCw } from 'lucide-react';
+import type { AppSidebarProps } from './AppSidebar.types';
+import { useI18n } from '@/i18n';
+
+type SidebarHeaderProps = Pick<AppSidebarProps, 'activeTab' | 'activeRepo' | 'onRefreshRemoteQuick' | 'remoteSync' | 'isGitActionRunning'>;
+
+export const SidebarHeader: React.FC<SidebarHeaderProps> = ({ activeTab, activeRepo, onRefreshRemoteQuick, remoteSync, isGitActionRunning }) => {
+  const { t, tr } = useI18n();
+
+  return (
+    <div className="sidebar-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <span>
+        {activeTab === 'localRepos'
+          ? t('sidebar.localRepos')
+          : activeTab === 'repo'
+            ? t('sidebar.currentRepository')
+            : activeTab === 'planner'
+              ? t('sidebar.planner')
+              : activeTab === 'analytics'
+                ? tr('Statistik & Analyse', 'Statistics & analytics')
+                : activeTab === 'github' || activeTab === 'hosting'
+                  ? tr('Hosting', 'Hosting')
+                  : t('sidebar.settings')}
+      </span>
+      <div className="sidebar-header-actions">
+        {activeTab === 'repo' && activeRepo && (
+          <button
+            className="icon-btn"
+            style={{ padding: '4px' }}
+            onClick={onRefreshRemoteQuick}
+            title={t('sidebar.refreshRemote')}
+            disabled={remoteSync.isFetching || isGitActionRunning}
+          >
+            <RefreshCw size={14} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+};

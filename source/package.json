@@ -1,0 +1,239 @@
+{
+  "name": "open-git-control",
+  "productName": "Open-Git-Control",
+  "desktopName": "Open-Git-Control",
+  "private": true,
+  "version": "3.2.3",
+  "description": "Desktop app for organizing and controlling Git repositories.",
+  "license": "GPL-3.0-only",
+  "copyright": "Copyright © 2026 Tim Bornemann",
+  "author": {
+    "name": "Tim Bornemann",
+    "email": "tim@timbornemann.de"
+  },
+  "main": "dist-electron/electron/main.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/timbornemann/Open-Git-Control.git"
+  },
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"npm run electron:dev\"",
+    "electron:dev": "npm run build:electron && wait-on tcp:5173 && cross-env NODE_ENV=development node scripts/start-electron.js",
+    "build": "tsc -b && vite build && node scripts/verify-view-chunks.js && node scripts/bundle-electron-preload.js",
+    "build:electron": "tsc --project tsconfig.node.json && node scripts/bundle-electron-preload.js",
+    "lint": "eslint src electron --max-warnings=0 && npm run arch:check",
+    "arch:check": "node scripts/check-architecture.js",
+    "format:check": "prettier --check .",
+    "legal:prepare": "node scripts/prepare-distribution-legal-files.js",
+    "legal:check": "node scripts/prepare-distribution-legal-files.js --check",
+    "licenses:update": "node scripts/update-spdx-license-texts.js",
+    "recovery:build": "node scripts/build-recovery.js",
+    "recovery:test": "cargo test --manifest-path recovery/Cargo.toml --locked",
+    "recovery:check": "cargo fmt --manifest-path recovery/Cargo.toml -- --check && cargo clippy --manifest-path recovery/Cargo.toml --locked --all-targets -- -D warnings",
+    "recovery:smoke": "node scripts/test-recovery.js",
+    "dist": "npm run legal:prepare && npm run recovery:build && npm run build && electron-builder --publish never",
+    "dist:win": "npm run legal:prepare && npm run recovery:build && npm run build && electron-builder --win nsis --x64 --publish never",
+    "dist:linux": "npm run legal:prepare && npm run recovery:build && npm run build && electron-builder --linux AppImage deb --x64 --publish never",
+    "dist:mac": "npm run legal:prepare && npm run recovery:build && npm run build && electron-builder --mac dmg zip --x64 --publish never",
+    "release:win": "npm run dist:win",
+    "release:linux": "npm run dist:linux",
+    "release:mac": "npm run dist:mac",
+    "preview": "vite preview",
+    "electron:start": "cross-env NODE_ENV=development node scripts/start-electron.js",
+    "test": "npm run test:unit",
+    "test:unit": "node scripts/run-tests.js",
+    "test:coverage": "node scripts/run-tests.js --coverage",
+    "test:storage:electron": "npm run build:electron && node scripts/test-storage-electron.js",
+    "test:startup:electron": "node scripts/test-startup-electron.js",
+    "test:schema:electron": "npm run build:electron && node scripts/test-schema-validation-electron.js",
+    "test:ci": "npm run legal:prepare && npm run legal:check && npm run lint && npm run format:check && npm run build:electron && npm run test:coverage && npm run build",
+    "docs:release-links": "node scripts/update-readme-release-links.js"
+  },
+  "dependencies": {
+    "@codemirror/lang-cpp": "^6.0.3",
+    "@codemirror/lang-css": "^6.3.1",
+    "@codemirror/lang-go": "^6.0.1",
+    "@codemirror/lang-html": "^6.4.11",
+    "@codemirror/lang-java": "^6.0.2",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/lang-markdown": "^6.5.0",
+    "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/lang-rust": "^6.0.2",
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/lang-xml": "^6.1.0",
+    "@codemirror/lang-yaml": "^6.1.3",
+    "@tanstack/react-query": "^5.104.0",
+    "ajv": "^8.20.0",
+    "builder-util-runtime": "9.7.0",
+    "codemirror": "^6.0.2",
+    "d3-force": "^3.0.0",
+    "dompurify": "^3.4.17",
+    "electron-updater": "^6.8.9",
+    "html-minifier-terser": "^7.2.0",
+    "jsonc-parser": "^3.3.1",
+    "lucide-react": "^0.300.0",
+    "marked": "^18.0.5",
+    "octokit": "^5.0.5",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "xml-formatter": "^3.7.0",
+    "yaml": "^2.9.0",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@types/d3-force": "^3.0.10",
+    "@types/html-minifier-terser": "^7.0.2",
+    "@types/node": "^20.10.0",
+    "@types/react": "^18.2.43",
+    "@types/react-dom": "^18.2.17",
+    "@typescript-eslint/eslint-plugin": "^8.62.0",
+    "@typescript-eslint/parser": "^8.62.0",
+    "@vitejs/plugin-react": "^6.0.2",
+    "@vitest/coverage-v8": "^4.1.12",
+    "concurrently": "^9.2.3",
+    "cross-env": "^7.0.3",
+    "electron": "^43.8.3",
+    "electron-builder": "^26.15.3",
+    "eslint": "^10.6.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "jsdom": "^29.1.1",
+    "prettier": "^3.9.4",
+    "typescript": "^5.2.2",
+    "vite": "^8.3.5",
+    "vitest": "^4.1.12",
+    "wait-on": "^9.0.10"
+  },
+  "overrides": {
+    "brace-expansion@^5.0.0": "^5.0.12",
+    "@electron/get@3.1.0": {
+      "global-agent": "^4.1.3"
+    }
+  },
+  "build": {
+    "appId": "com.opengitcontrol.app",
+    "productName": "Open-Git-Control",
+    "afterPack": "scripts/package-recovery.js",
+    "afterAllArtifactBuild": "scripts/package-recovery-artifacts.js",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json",
+      "logo.ico",
+      "logo.png"
+    ],
+    "extraResources": [
+      {
+        "from": "build/recovery",
+        "to": "recovery"
+      },
+      {
+        "from": "LICENSE",
+        "to": "LICENSE"
+      },
+      {
+        "from": "build/THIRD_PARTY_NOTICES.txt",
+        "to": "THIRD_PARTY_NOTICES.txt"
+      }
+    ],
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "timbornemann",
+        "repo": "Open-Git-Control",
+        "releaseType": "release"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "logo.ico"
+    },
+    "nsis": {
+      "include": "packaging/recovery.nsh",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "license": "build/LICENSE.txt"
+    },
+    "deb": {
+      "fpm": [
+        "packaging/recovery.desktop=/usr/share/applications/open-git-control-recovery.desktop"
+      ]
+    },
+    "linux": {
+      "maintainer": "Tim Bornemann <tim@timbornemann.de>",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "logo.png",
+      "category": "Development",
+      "syncDesktopName": true
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "logo.png",
+      "category": "public.app-category.developer-tools",
+      "identity": null,
+      "hardenedRuntime": false,
+      "notarize": false
+    },
+    "dmg": {
+      "contents": [
+        {
+          "x": 130,
+          "y": 140,
+          "type": "file"
+        },
+        {
+          "x": 410,
+          "y": 140,
+          "type": "link",
+          "path": "/Applications"
+        },
+        {
+          "x": 130,
+          "y": 310,
+          "type": "file",
+          "path": "build/Open-Git-Control Recovery.app"
+        }
+      ],
+      "license": "build/LICENSE.txt"
+    }
+  }
+}

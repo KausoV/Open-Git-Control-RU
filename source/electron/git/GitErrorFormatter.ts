@@ -1,0 +1,73 @@
+import { createRepoUnavailableErrorMessage, isRepoUnavailableError } from '../../src/shared/git/errors';
+import { readGitProcessErrorText } from './GitProcessTypes';
+import { redactHostingSecrets } from '../hosting/hostingRedaction';
+import { redactGitCredentials } from '../../src/shared/git/redaction';
+
+export const EXPECTED_NON_FATAL_GIT_ERROR_NAME = 'ExpectedNonFatalGitError';
+
+export const isMissingOriginGitError = (error: unknown): boolean =>
+  /(?:no such remote ['"]?origin['"]?|remote ['"]?origin['"]? not found)/i.test(error instanceof Error ? error.message : String(error));
+
+/** Redacts credentials before a Git failure reaches logs or the renderer. */
+export const redactGitSensitiveText = (value: unknown): string => {
+  return redactHostingSecrets(redactGitCredentials(redactHostingSecrets(String(value ?? ''))));
+};
+
+export class GitErrorFormatter {
+  normalizeGitError(error: unknown, args: string[]): Error {
+    const gitOut = readGitProcessErrorText(error, 'stderr').trim() || readGitProcessErrorText(error, 'stdout').trim();
+    const fallbackMessage = readGitProcessErrorText(error, 'message') || 'Unknown git error';
+    const detailedMessage = gitOut ? `${fallbackMessage}\nGit Output: ${gitOut}` : fallbackMessage;
+    const isRepoUnavailable = isRepoUnavailableError(detailedMessage);
+    const isExpectedNonFatal = this.isExpectedNonFatalGitError(args, detailedMessage, gitOut, readGitProcessErrorText(error, 'code'));
+    const finalMessage = isRepoUnavailable ? createRepoUnavailableErrorMessage(gitOut || fallbackMessage) : detailedMessage;
+    const safeFinalMessage = redactGitSensitiveText(finalMessage);
+
+    if (!isRepoUnavailable && !isExpectedNonFatal) {
+      const safeArgs = args.map(redactGitSensitiveText).join(' ');
+      console.error(`Git Error executing "git ${safeArgs}":\n${safeFinalMessage}`);
+    }
+    const normalizedError = new Error(safeFinalMessage);
+    if (isExpectedNonFatal) {
+      normalizedError.name = EXPECTED_NON_FATAL_GIT_ERROR_NAME;
+    }
+    return normalizedError;
+  }
+
+  private isExpectedNonFatalGitError(args: string[], errorText: string, gitOutput: string, exitCode: string): boolean {
+    const primary = String(args?.[0] || '')
+      .trim()
+      .toLowerCase();
+    const secondary = String(args?.[1] || '')
+      .trim()
+      .toLowerCase();
+    const expectsUpstreamRef = args.some((arg) => String(arg || '').trim() === '@{upstream}');
+    if (primary === 'rev-parse' && expectsUpstreamRef) {
+      return (
+        /no upstream configured for branch/i.test(errorText) ||
+        /upstream branch .* not stored as a remote-tracking branch/i.test(errorText) ||
+        /fatal: no such branch/i.test(errorText)
+      );
+    }
+    if (primary === 'rev-parse' && args.includes('--verify') && args.includes('--quiet')) {
+      // Missing optional refs exit 1 without diagnostics, including with an absolute Git executable path.
+      return (
+        (!gitOutput && (exitCode === '1' || (!exitCode && /^command failed:\s*git\s+rev-parse\s+--verify\s+--quiet\b/i.test(errorText)))) ||
+        /needed a single revision|unknown revision or path not in the working tree|ambiguous argument .*unknown revision/i.test(errorText)
+      );
+    }
+    if (primary === 'config' && (args.includes('--get') || args.includes('--get-all'))) {
+      // Git uses exit code 1 without stderr when an optional configuration key
+      // does not exist. Several callers intentionally probe these values before
+      // falling back to Git's defaults.
+      return !gitOutput && /^command failed:\s*git\s+config\s+--get(?:-all)?\s+\S+/i.test(errorText);
+    }
+    if (primary === 'submodule' && secondary === 'status') {
+      return /no submodule mapping found in \.gitmodules for path/i.test(errorText);
+    }
+    if (primary === 'remote' && secondary === 'get-url' && String(args?.[2] || '').trim() === 'origin') {
+      return /no such remote ['"]?origin['"]?/i.test(errorText);
+    }
+    return false;
+  }
+}

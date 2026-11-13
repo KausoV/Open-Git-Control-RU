@@ -1,0 +1,74 @@
+[
+  {
+    "file": "src\\components\\branch-change\\branchChangeText.ts",
+    "text": "message"
+  },
+  {
+    "file": "src\\components\\file-details\\useFileDetailDates.ts",
+    "text": "Math.max(1, Math.round(absMs / minute)) + ' min ago'"
+  },
+  {
+    "file": "src\\components\\file-details\\useFileDetailDates.ts",
+    "text": "Math.max(1, Math.round(absMs / hour)) + ' h ago'"
+  },
+  {
+    "file": "src\\components\\file-details\\useFileDetailDates.ts",
+    "text": "days + ' day' + (days === 1 ? '' : 's') + ' ago'"
+  },
+  {
+    "file": "src\\components\\hosting\\hostingLabels.ts",
+    "text": "ciLabels[provider]"
+  },
+  {
+    "file": "src\\components\\hosting\\RemoteTransferHost.tsx",
+    "text": "en"
+  },
+  {
+    "file": "src\\components\\hosting\\remoteTransferProgressNotification.ts",
+    "text": "value.toLocaleString('en-US')"
+  },
+  {
+    "file": "src\\components\\hosting\\secretScanNotification.ts",
+    "text": "value.toLocaleString('en-US')"
+  },
+  {
+    "file": "src\\components\\layout\\workflows\\gitCommandGuardHandlers.ts",
+    "text": "isPushGuard ? 'Push is likely blocked in this state' : 'Pull is risky in this state'"
+  },
+  {
+    "file": "src\\components\\layout\\workflows\\gitCommandGuardHandlers.ts",
+    "text": "isPushGuard\n          ? `Remote is ahead by ${behindCount} commit${behindCount === 1 ? '' : 's'} and local changes are still uncommitted. A regular pu"
+  },
+  {
+    "file": "src\\components\\layout\\workflows\\gitCommandGuardHandlers.ts",
+    "text": "isPushGuard ? 'Push anyway' : 'Pull anyway'"
+  },
+  {
+    "file": "src\\components\\layout\\workflows\\useGitCommandWorkflow.ts",
+    "text": "mergeInProgress\n                  ? 'A merge is already in progress and not finished yet. Opening the conflict resolver.'\n                  : cherryPi"
+  },
+  {
+    "file": "src\\components\\layout\\workflows\\useGitSyncRecoveryWorkflow.ts",
+    "text": "command === 'push'\n            ? 'Quick fix completed (stash -> pull --rebase -> stash pop). You can push again now.'\n            : 'Quick fix complet"
+  },
+  {
+    "file": "src\\components\\repository-analytics\\AnalyticsDetails.tsx",
+    "text": "kind === 'directories' ? 'Directory' : 'File'"
+  },
+  {
+    "file": "src\\components\\repository-analytics\\RepositoryAnalyticsView.tsx",
+    "text": "warning"
+  },
+  {
+    "file": "src\\components\\repository-analytics\\RepositoryAnalyticsView.tsx",
+    "text": "warning"
+  },
+  {
+    "file": "src\\components\\repository-run\\RepositoryRunLinkedText.tsx",
+    "text": "'Open in app editor: ' + location"
+  },
+  {
+    "file": "src\\utils\\gitFailure.ts",
+    "text": "en"
+  }
+]

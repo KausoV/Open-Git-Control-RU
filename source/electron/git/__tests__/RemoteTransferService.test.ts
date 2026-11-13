@@ -1,0 +1,480 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { GitIntegrationLifecycle } from './gitIntegrationLifecycle';
+import { RemoteTransferService } from '../RemoteTransferService';
+import { fixture, git, olderGitService, cleanupTransferFixtures } from './remoteTransferFixture';
+
+vi.mock('electron', () => ({ app: { getPath: () => os.tmpdir() } }));
+
+const lifecycles: GitIntegrationLifecycle[] = [];
+// Push planning/verification launches many Git processes on shared CI hosts.
+const integrationTest = (name: string, work: (lifecycle: GitIntegrationLifecycle) => Promise<void>) =>
+  it(
+    name,
+    () => {
+      const lifecycle = new GitIntegrationLifecycle();
+      lifecycles.push(lifecycle);
+      return lifecycle.track(Promise.resolve().then(() => work(lifecycle)));
+    },
+    60_000,
+  );
+afterEach(async () => {
+  await Promise.all(lifecycles.splice(0).map((lifecycle) => lifecycle.close()));
+  vi.restoreAllMocks();
+  await cleanupTransferFixtures();
+}, 60_000);
+
+describe('RemoteTransferService with real Git', () => {
+  integrationTest('adds and edits remote addresses while preserving push URLs, tracking and transfer selections', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    const originalUrl = 'https://forge.example/team/original.git';
+    const pushUrl = 'ssh://git@push.example/team/original.git';
+    git(f.repo, 'remote', 'add', 'origin', originalUrl);
+    git(f.repo, 'config', '--add', 'remote.origin.pushurl', pushUrl);
+    git(f.repo, 'config', 'branch.main.remote', 'origin');
+    git(f.repo, 'config', 'branch.main.merge', 'refs/heads/main');
+    git(f.repo, 'config', 'remote.pushDefault', 'origin');
+    git(f.repo, 'config', 'url.https://forge.example/.insteadOf', 'forge:');
+    f.store.write(f.repo, {
+      fetchRemote: 'origin',
+      pullRemote: 'origin',
+      pushRemotes: ['origin'],
+      bindings: [{ remoteName: 'origin', url: originalUrl, repository: { connectionId: 'account', repositoryId: '42', fullPath: 'team/original' } }],
+    });
+    const commands = vi.spyOn(lifecycle.runner, 'runResult');
+    const added = await f.service.editRemote(f.repo, { action: 'add', name: 'backup', url: 'https://backup.example/team/repo.git' }, f.context);
+    expect(added.remotes.map((remote) => remote.name)).toEqual(['backup', 'origin']);
+    expect(f.service.getPreferences(f.repo).bindings).toHaveLength(1);
+    const updated = await f.service.editRemote(f.repo, { action: 'set-url', name: 'origin', url: 'forge:team/renamed.git' }, f.context);
+    expect(updated).toMatchObject({ branch: 'main', upstream: { remote: 'origin', branch: 'main' }, defaultPushRemote: 'origin' });
+    expect(updated.remotes.find((remote) => remote.name === 'origin')).toEqual({
+      name: 'origin',
+      fetchUrls: ['https://forge.example/team/renamed.git'],
+      pushUrls: [pushUrl],
+    });
+    expect(f.service.getPreferences(f.repo)).toMatchObject({ fetchRemote: 'origin', pullRemote: 'origin', pushRemotes: ['origin'], bindings: [] });
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.initial);
+    expect(git(f.repo, 'config', '--get', 'remote.origin.url')).toBe('forge:team/renamed.git');
+    expect(git(f.repo, 'config', '--get-all', 'remote.origin.pushurl')).toBe(pushUrl);
+    expect(commands.mock.calls.some(([, args]) => ['fetch', 'pull', 'push', 'ls-remote'].includes(args[0]))).toBe(false);
+    expect(f.context.authorizePush).not.toHaveBeenCalled();
+  });
+
+  integrationTest('publishes a different release branch only to its selected endpoint without checkout, backup push or upstream changes', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    const selected = f.bare('release-source');
+    const backup = f.bare('release-backup');
+    git(f.repo, 'remote', 'add', 'origin', selected);
+    git(f.repo, 'config', '--add', 'remote.origin.pushurl', selected);
+    git(f.repo, 'config', '--add', 'remote.origin.pushurl', backup);
+    git(f.repo, 'config', 'branch.main.remote', 'origin');
+    git(f.repo, 'config', 'branch.main.merge', 'refs/heads/main');
+    git(f.repo, 'checkout', '-b', 'release');
+    const releaseOid = f.commit('release version');
+    git(f.repo, 'checkout', 'main');
+    const plan = await f.service.planPush(
+      f.repo,
+      { repoPath: f.repo, remoteNames: ['origin'], sourceBranch: 'release', targetUrls: { origin: [selected] } },
+      f.context,
+    );
+    expect(plan).toMatchObject({ branch: 'main', sourceBranch: 'release', sourceOid: releaseOid, tagNames: [] });
+    expect((await f.service.executePush(f.repo, plan.id, f.context)).state).toBe('success');
+    expect(f.ref(selected, 'refs/heads/release')).toBe(releaseOid);
+    expect(git(f.repo, `--git-dir=${backup}`, 'for-each-ref', '--format=%(refname)', 'refs/heads')).toBe('');
+    expect(git(f.repo, 'symbolic-ref', '--short', 'HEAD')).toBe('main');
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.initial);
+    expect(git(f.repo, 'config', '--get', 'branch.main.merge')).toBe('refs/heads/main');
+    expect(f.context.authorizePush).toHaveBeenCalledWith(plan.secretScanArgs);
+  });
+
+  integrationTest('rejects a changed explicitly selected source branch before a release push', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    const target = f.bare('changed-release-source');
+    git(f.repo, 'remote', 'add', 'origin', target);
+    git(f.repo, 'branch', 'release');
+    const plan = await f.service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['origin'], sourceBranch: 'release' }, f.context);
+    const later = f.commit('later');
+    git(f.repo, 'update-ref', 'refs/heads/release', later);
+    await expect(f.service.executePush(f.repo, plan.id, f.context)).rejects.toThrow('source branch changed');
+    expect(f.context.authorizePush).not.toHaveBeenCalled();
+  });
+
+  integrationTest('keeps mixed remote URL lists and branch.pushRemote precedence', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    git(f.repo, 'remote', 'add', 'forgejo', 'https://forge.example.invalid/team/private.git');
+    git(f.repo, 'remote', 'add', 'github', 'git@github.com:team/backup.git');
+    git(f.repo, 'config', '--add', 'remote.forgejo.pushurl', 'https://forge.example.invalid/team/private.git');
+    git(f.repo, 'config', '--add', 'remote.forgejo.pushurl', 'https://github.com/team/backup.git');
+    git(f.repo, 'config', 'branch.main.remote', 'forgejo');
+    git(f.repo, 'config', 'branch.main.merge', 'refs/heads/trunk');
+    git(f.repo, 'config', 'remote.pushDefault', 'forgejo');
+    git(f.repo, 'config', 'branch.main.pushRemote', 'github');
+    const snapshot = await f.service.getRemotes(f.repo);
+    expect(snapshot.defaultPushRemote).toBe('github');
+    expect(snapshot.upstream).toEqual({ remote: 'forgejo', branch: 'trunk' });
+    expect(snapshot.remotes.find((remote) => remote.name === 'forgejo')?.pushUrls).toHaveLength(2);
+    expect(snapshot.remotes.find((remote) => remote.name === 'github')?.fetchUrls).toEqual(['git@github.com:team/backup.git']);
+  });
+
+  integrationTest('publishes captured commit and selected tag to isolated URLs while preserving named hooks', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    const a = f.bare('forgejo');
+    const b = f.bare('github');
+    git(f.repo, 'remote', 'add', 'origin', a);
+    git(f.repo, 'config', '--add', 'remote.origin.pushurl', a);
+    git(f.repo, 'config', '--add', 'remote.origin.pushurl', b);
+    git(f.repo, 'config', 'push.followTags', 'true');
+    git(f.repo, 'config', 'remote.origin.mirror', 'true');
+    git(f.repo, 'tag', '-a', 'selected', '-m', 'selected');
+    git(f.repo, 'tag', '-a', 'omitted', '-m', 'omitted');
+    const tagOid = git(f.repo, 'rev-parse', 'refs/tags/selected');
+    const hookOutput = path.join(f.root, 'hooks.txt');
+    const quoted = `'${hookOutput.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`;
+    const hookPath = path.join(f.repo, '.git', 'hooks', 'pre-push');
+    fs.writeFileSync(hookPath, `#!/bin/sh\nprintf '%s\\n' "$1" >> ${quoted}\n`, { mode: 0o755 });
+    const plan = await f.service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['origin'], tagNames: ['selected'] }, f.context);
+    expect(plan.targets).toHaveLength(2);
+    f.commit('later commit');
+    git(f.repo, 'tag', '-f', 'selected', 'HEAD');
+    const result = await f.service.executePush(f.repo, plan.id, f.context);
+    expect(result.state).toBe('success');
+    expect(f.ref(a)).toBe(f.initial);
+    expect(f.ref(b)).toBe(f.initial);
+    expect(f.ref(a, 'refs/tags/selected')).toBe(tagOid);
+    expect(git(f.repo, `--git-dir=${b}`, 'tag', '--list')).toBe('selected');
+    expect(fs.readFileSync(hookOutput, 'utf8').trim().split(/\r?\n/)).toEqual(['origin', 'origin']);
+    expect(git(f.repo, 'config', '--get-all', 'remote.origin.pushurl').split(/\r?\n/)).toEqual([a, b]);
+    expect(f.context.authorizePush).toHaveBeenCalledWith(plan.secretScanArgs);
+    expect(plan.secretScanArgs[0]).toContain(plan.id);
+  });
+
+  integrationTest('publishes an explicit hosting endpoint without touching another native push URL or Git configuration', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    const selected = f.bare('selected-release');
+    const backup = f.bare('unselected-backup');
+    git(f.repo, 'remote', 'add', 'origin', selected);
+    git(f.repo, 'config', '--add', 'remote.origin.pushurl', selected);
+    git(f.repo, 'config', '--add', 'remote.origin.pushurl', backup);
+    const plan = await f.service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['origin'], targetUrls: { origin: [selected] } }, f.context);
+    expect(plan.targets).toHaveLength(1);
+    expect(plan.targets[0]).toMatchObject({ remoteName: 'origin', url: selected });
+    expect((await f.service.executePush(f.repo, plan.id, f.context)).state).toBe('success');
+    expect(f.ref(selected)).toBe(f.initial);
+    expect(git(f.repo, `--git-dir=${backup}`, 'for-each-ref', '--format=%(refname)', 'refs/heads')).toBe('');
+    expect(git(f.repo, 'config', '--get-all', 'remote.origin.pushurl').split(/\r?\n/)).toEqual([selected, backup]);
+  });
+
+  integrationTest('rejects foreign, empty and unselected remote URL constraints before publishing', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    const selected = f.bare('registered');
+    const other = f.bare('foreign');
+    git(f.repo, 'remote', 'add', 'origin', selected);
+    const invalidSelections: Array<Record<string, string[]>> = [{ origin: [other] }, { origin: [] }, { other: [selected] }];
+    for (const targetUrls of invalidSelections)
+      await expect(f.service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['origin'], targetUrls }, f.context)).rejects.toThrow();
+    expect(git(f.repo, `--git-dir=${selected}`, 'for-each-ref', '--format=%(refname)', 'refs/heads')).toBe('');
+    expect(f.context.authorizePush).not.toHaveBeenCalled();
+  });
+
+  integrationTest('requires separate remotes for explicit endpoint subsets when native Git cannot isolate push URLs', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    const selected = f.bare('older-selected');
+    const backup = f.bare('older-backup');
+    git(f.repo, 'remote', 'add', 'origin', selected);
+    git(f.repo, 'config', '--add', 'remote.origin.pushurl', selected);
+    git(f.repo, 'config', '--add', 'remote.origin.pushurl', backup);
+    const { service, pushCommands } = olderGitService(f);
+    await expect(service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['origin'], targetUrls: { origin: [selected] } }, f.context)).rejects.toThrow(
+      'separate named remotes',
+    );
+    expect(pushCommands).toHaveLength(0);
+    const complete = await service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['origin'], targetUrls: { origin: [selected, backup] } }, f.context);
+    expect(complete.targets).toHaveLength(2);
+    expect(complete.targets.every((target) => target.grouped)).toBe(true);
+  });
+
+  integrationTest('rejects a branch switch before execution even when the source commit has not moved', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    const destination = f.bare('branch-guard');
+    git(f.repo, 'remote', 'add', 'origin', destination);
+    const plan = await f.service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['origin'] }, f.context);
+    git(f.repo, 'checkout', '-b', 'another');
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(plan.sourceOid);
+    await expect(f.service.executePush(f.repo, plan.id, f.context)).rejects.toThrow('current branch changed');
+    expect(f.context.authorizePush).not.toHaveBeenCalled();
+    expect(git(f.repo, `--git-dir=${destination}`, 'for-each-ref', '--format=%(refname)', 'refs/heads')).toBe('');
+  });
+
+  integrationTest('preserves the completed endpoint and stops remaining targets after a branch switch during a batch', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    const first = f.bare('branch-first');
+    const remaining = f.bare('branch-remaining');
+    git(f.repo, 'remote', 'add', 'origin', first);
+    git(f.repo, 'config', '--add', 'remote.origin.pushurl', first);
+    git(f.repo, 'config', '--add', 'remote.origin.pushurl', remaining);
+    const plan = await f.service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['origin'] }, f.context);
+    const context = {
+      ...f.context,
+      onProgress: (message: string) => {
+        if (message.startsWith('success:')) git(f.repo, 'checkout', '-b', 'another');
+      },
+    };
+    const result = await f.service.executePush(f.repo, plan.id, context);
+    expect(result.state).toBe('cancelled');
+    expect(result.targets.map((target) => target.status)).toEqual(['success', 'skipped']);
+    expect(result.targets[1].message).toContain('current branch changed');
+    expect(f.ref(first)).toBe(f.initial);
+    expect(git(f.repo, `--git-dir=${remaining}`, 'for-each-ref', '--format=%(refname)', 'refs/heads')).toBe('');
+  });
+
+  integrationTest('reports partial success and retries only the failed endpoint with the original snapshot', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    const a = f.bare('available');
+    const b = path.join(f.root, 'offline.git');
+    git(f.repo, 'remote', 'add', 'primary', a);
+    git(f.repo, 'remote', 'add', 'backup', b);
+    const plan = await f.service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['primary', 'backup'] }, f.context);
+    const batch = await f.service.executePush(f.repo, plan.id, f.context);
+    expect(batch.state).toBe('partial');
+    expect(batch.targets[0].status).toBe('success');
+    expect(batch.targets[1].status).toBe('unknown');
+    fs.mkdirSync(b);
+    git(b, 'init', '--bare');
+    f.commit('newer snapshot');
+    const retry = await f.service.retryPush(f.repo, batch.id, undefined, f.context);
+    expect(retry.state).toBe('success');
+    expect(f.ref(a)).toBe(f.initial);
+    expect(f.ref(b)).toBe(f.initial);
+    expect(retry.targets[0]).toEqual(batch.targets[0]);
+  });
+
+  integrationTest('captures distinct force leases for each push URL and rejects a later endpoint change', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    const a = f.bare('a');
+    const b = f.bare('b');
+    const oldA = f.commit('old a');
+    git(f.repo, 'push', a, `${oldA}:refs/heads/main`);
+    const oldB = f.commit('old b');
+    git(f.repo, 'push', b, `${oldB}:refs/heads/main`);
+    git(f.repo, 'reset', '--hard', f.initial);
+    git(f.repo, 'remote', 'add', 'both', a);
+    git(f.repo, 'config', '--add', 'remote.both.pushurl', a);
+    git(f.repo, 'config', '--add', 'remote.both.pushurl', b);
+    const plan = await f.service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['both'], force: true }, f.context);
+    expect(plan.targets.map((target) => target.leaseOid)).toEqual([oldA, oldB]);
+    git(f.repo, 'push', '--force', b, `${oldA}:refs/heads/main`);
+    const result = await f.service.executePush(f.repo, plan.id, f.context);
+    expect(result.state).toBe('partial');
+    expect(result.targets.map((target) => target.status)).toEqual(['success', 'rejected']);
+    expect(f.ref(a)).toBe(f.initial);
+    expect(f.ref(b)).toBe(oldA);
+    const retry = await f.service.retryPush(f.repo, result.id, undefined, f.context);
+    expect(retry.targets[1].message).toContain('Create a new plan');
+    expect(f.ref(b)).toBe(oldA);
+  });
+
+  integrationTest('binds plans to sender, repository generation, and exact remote configuration', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    const a = f.bare('a');
+    git(f.repo, 'remote', 'add', 'origin', a);
+    const plan = await f.service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['origin'] }, f.context);
+    await expect(f.service.executePush(f.repo, plan.id, { ...f.context, ownerId: 2 })).rejects.toThrow('another repository or window');
+    await expect(f.service.executePush(f.repo, plan.id, { ...f.context, generation: 1 })).rejects.toThrow('another repository or window');
+    git(f.repo, 'remote', 'set-url', 'origin', f.bare('other'));
+    await expect(f.service.executePush(f.repo, plan.id, f.context)).rejects.toThrow('Remote configuration');
+    expect(f.context.authorizePush).not.toHaveBeenCalled();
+  });
+
+  integrationTest('blocks credentials in remote URLs and preserves a corrupt preference file', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    await expect(f.service.editRemote(f.repo, { action: 'add', name: 'origin', url: 'https://secret@host.invalid/repo.git' }, f.context)).rejects.toThrow(
+      'credential-free',
+    );
+    fs.writeFileSync(path.join(f.root, 'preferences.json'), 'broken');
+    expect(() => f.store.write(f.repo, {})).toThrow('preserved');
+    expect(fs.readFileSync(path.join(f.root, 'preferences.json'), 'utf8')).toBe('broken');
+  });
+
+  integrationTest('uses per-remote destination branches and pulls the chosen source without changing the upstream', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    const a = f.bare('private');
+    const b = f.bare('backup');
+    git(f.repo, 'remote', 'add', 'forgejo', a);
+    git(f.repo, 'remote', 'add', 'github', b);
+    const plan = await f.service.planPush(
+      f.repo,
+      { repoPath: f.repo, remoteNames: ['forgejo', 'github'], targetBranches: { forgejo: 'private-main', github: 'backup-main' } },
+      f.context,
+    );
+    expect(plan.targets.map((target) => target.destinationRef)).toEqual(['refs/heads/private-main', 'refs/heads/backup-main']);
+    expect((await f.service.executePush(f.repo, plan.id, f.context)).state).toBe('success');
+    expect(f.ref(a, 'refs/heads/private-main')).toBe(f.initial);
+    expect(f.ref(b, 'refs/heads/backup-main')).toBe(f.initial);
+    const advanced = f.commit('backup changed');
+    git(f.repo, 'push', b, `${advanced}:refs/heads/backup-main`);
+    git(f.repo, 'reset', '--hard', f.initial);
+    git(f.repo, 'config', 'branch.main.remote', 'forgejo');
+    git(f.repo, 'config', 'branch.main.merge', 'refs/heads/private-main');
+    await f.service.pull(f.repo, { repoPath: f.repo, remote: 'github', branch: 'backup-main', mode: 'ff-only' }, f.context);
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(advanced);
+    expect(git(f.repo, 'config', '--get', 'branch.main.remote')).toBe('forgejo');
+    expect(git(f.repo, 'config', '--get', 'branch.main.merge')).toBe('refs/heads/private-main');
+  });
+
+  integrationTest('binds each endpoint to its selected account and rejects authentication changes after review', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    const a = f.bare('account-a');
+    const b = f.bare('account-b');
+    git(f.repo, 'remote', 'add', 'forgejo', a);
+    git(f.repo, 'remote', 'add', 'github', b);
+    f.store.write(f.repo, {
+      bindings: [
+        { remoteName: 'forgejo', url: a, repository: { connectionId: 'forgejo-account', repositoryId: '1', fullPath: 'team/private' } },
+        { remoteName: 'github', url: b, repository: { connectionId: 'github-account', repositoryId: '2', fullPath: 'team/backup' } },
+      ],
+    });
+    const generations: Record<string, number> = { 'forgejo-account': 3, 'github-account': 7 };
+    const dispose = vi.fn();
+    const credentials = vi.fn(
+      async (input: { connectionId?: string | null; urls: string[]; expectedGeneration?: number; envOverrides?: NodeJS.ProcessEnv }) => ({
+        envOverrides: input.envOverrides ?? {},
+        dispose,
+      }),
+    );
+    const service = new RemoteTransferService(lifecycle.runner, f.store, credentials, (id) => generations[id]);
+    const invalid = await service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['forgejo', 'github'] }, f.context);
+    generations['github-account']++;
+    await expect(service.executePush(f.repo, invalid.id, f.context)).rejects.toThrow('Hosting authentication changed');
+    await expect(service.getPushScanScope(f.repo, invalid.secretScanArgs, f.context)).rejects.toThrow('Hosting authentication changed');
+    expect(credentials).not.toHaveBeenCalled();
+    const plan = await service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['forgejo', 'github'] }, f.context);
+    const scope = await service.getPushScanScope(f.repo, plan.secretScanArgs, f.context);
+    expect(scope?.summary).toMatchObject({ mode: 'incremental', endpointCount: 2, totalCommits: 1 });
+    await scope!.assertCurrent();
+    expect(credentials.mock.calls.map(([input]) => [input.connectionId, input.urls, input.expectedGeneration])).toEqual([
+      ['forgejo-account', [a], 3],
+      ['github-account', [b], 8],
+      ['forgejo-account', [a], 3],
+      ['github-account', [b], 8],
+    ]);
+    credentials.mockClear();
+    dispose.mockClear();
+    expect((await service.executePush(f.repo, plan.id, f.context)).state).toBe('success');
+    expect(credentials.mock.calls.map(([input]) => [input.connectionId, input.urls, input.expectedGeneration])).toEqual([
+      ['forgejo-account', [a], 3],
+      ['github-account', [b], 8],
+    ]);
+    expect(dispose).toHaveBeenCalledTimes(2);
+    generations['github-account']++;
+    await expect(scope!.assertCurrent()).rejects.toThrow('Hosting authentication changed');
+    const preferences = f.store.read(f.repo);
+    preferences.bindings![1].credentialMode = 'system';
+    await service.setPreferences(f.repo, preferences, f.context);
+    const nativePlan = await service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['github'] }, f.context);
+    generations['github-account']++;
+    generations['forgejo-account']++;
+    credentials.mockClear();
+    expect((await service.executePush(f.repo, nativePlan.id, f.context)).state).toBe('success');
+    expect(credentials).toHaveBeenCalledWith(expect.objectContaining({ connectionId: null, urls: [b], expectedGeneration: undefined }));
+    expect(f.store.read(f.repo).bindings![1].repository?.connectionId).toBe('github-account');
+  });
+
+  integrationTest('reports partial publication within one endpoint and retries only the missing selected ref', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    const target = f.bare('tag-conflict');
+    git(f.repo, 'remote', 'add', 'forgejo', target);
+    git(f.repo, 'tag', 'selected');
+    git(f.repo, 'push', target, 'refs/tags/selected:refs/tags/selected');
+    const captured = f.commit('planned branch and tag');
+    git(f.repo, 'tag', '-f', 'selected', 'HEAD');
+    const plan = await f.service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['forgejo'], tagNames: ['selected'] }, f.context);
+    const batch = await f.service.executePush(f.repo, plan.id, f.context);
+    expect(batch.state).toBe('partial');
+    expect(batch.targets[0].refResults).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ destinationRef: 'refs/heads/main', sourceOid: captured, status: 'success' }),
+        expect.objectContaining({ destinationRef: 'refs/tags/selected', status: 'rejected' }),
+      ]),
+    );
+    expect(f.ref(target)).toBe(captured);
+    git(f.repo, `--git-dir=${target}`, 'update-ref', '-d', 'refs/tags/selected');
+    f.commit('later branch');
+    const retry = await f.service.retryPush(f.repo, batch.id, undefined, f.context);
+    expect(retry.state).toBe('success');
+    expect(retry.targets[0].refResults).toHaveLength(1);
+    expect(retry.targets[0].refResults?.[0].destinationRef).toBe('refs/tags/selected');
+    expect(f.ref(target)).toBe(captured);
+    expect(f.ref(target, 'refs/tags/selected')).toBe(captured);
+  });
+
+  integrationTest('keeps normal grouped pushes available without URL isolation and preserves immutable sources', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    const a = f.bare('group-a');
+    const b = f.bare('group-b');
+    git(f.repo, 'remote', 'add', 'both', a);
+    git(f.repo, 'config', '--add', 'remote.both.pushurl', a);
+    git(f.repo, 'config', '--add', 'remote.both.pushurl', b);
+    git(f.repo, 'tag', '-a', 'selected', '-m', 'selected');
+    const capturedTag = git(f.repo, 'rev-parse', 'refs/tags/selected');
+    const { service, pushCommands } = olderGitService(f);
+    expect((await service.getRemotes(f.repo)).supportsPushUrlIsolation).toBe(false);
+    const plan = await service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['both'], tagNames: ['selected'] }, f.context);
+    expect(plan.targets.every((target) => target.grouped)).toBe(true);
+    f.commit('after grouped review');
+    git(f.repo, 'tag', '-f', 'selected', 'HEAD');
+    const result = await service.executePush(f.repo, plan.id, f.context);
+    expect(result.state).toBe('success');
+    expect(pushCommands).toHaveLength(1);
+    for (const target of [a, b]) {
+      expect(f.ref(target)).toBe(f.initial);
+      expect(f.ref(target, 'refs/tags/selected')).toBe(capturedTag);
+    }
+    expect(git(f.repo, 'config', '--get-all', 'remote.both.pushurl').split(/\r?\n/)).toEqual([a, b]);
+  });
+
+  integrationTest('reconciles partial grouped pushes but refuses per-URL force and targeted retries', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    const a = f.bare('group-available');
+    const b = path.join(f.root, 'group-offline.git');
+    git(f.repo, 'remote', 'add', 'both', a);
+    git(f.repo, 'config', '--add', 'remote.both.pushurl', a);
+    git(f.repo, 'config', '--add', 'remote.both.pushurl', b);
+    const { service } = olderGitService(f);
+    await expect(service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['both'], force: true }, f.context)).rejects.toThrow('Force-with-lease');
+    const plan = await service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['both'] }, f.context);
+    const result = await service.executePush(f.repo, plan.id, f.context);
+    expect(result.state).toBe('partial');
+    expect(result.targets.map((target) => target.status)).toEqual(['up-to-date', 'unknown']);
+    expect(f.ref(a)).toBe(f.initial);
+    await expect(service.retryPush(f.repo, result.id, [result.targets[1].id], f.context)).rejects.toThrow('Targeted retry');
+    f.store.write(f.repo, {
+      bindings: [
+        { remoteName: 'both', url: a, repository: { connectionId: 'account-a', repositoryId: '1', fullPath: 'team/repo' } },
+        { remoteName: 'both', url: b, repository: { connectionId: 'account-b', repositoryId: '2', fullPath: 'team/repo' } },
+      ],
+    });
+    await expect(service.planPush(f.repo, { repoPath: f.repo, remoteNames: ['both'] }, f.context)).rejects.toThrow('different hosting accounts');
+  });
+
+  integrationTest('fetches branches and remote tag tracking separately without moving an existing local tag', async (lifecycle) => {
+    const f = fixture(lifecycle);
+    const target = f.bare('tag-tracking');
+    git(f.repo, 'remote', 'add', 'forgejo', target);
+    git(f.repo, 'tag', 'release');
+    const advanced = f.commit('remote release');
+    git(f.repo, 'push', target, `${advanced}:refs/heads/main`, `${advanced}:refs/tags/release`, `${advanced}:refs/tags/remote-only`);
+    git(f.repo, 'reset', '--hard', f.initial);
+    await f.service.fetch(f.repo, 'forgejo', f.context, { background: true });
+    expect(git(f.repo, 'rev-parse', 'refs/remotes/forgejo/main')).toBe(advanced);
+    expect(git(f.repo, 'rev-parse', 'refs/tags/release')).toBe(f.initial);
+    expect(git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/ogc/remote-tags')).toBe('');
+    await f.service.fetch(f.repo, 'forgejo', f.context, { tagsOnly: true, background: true });
+    expect(git(f.repo, 'rev-parse', 'refs/ogc/remote-tags/forgejo/release')).toBe(advanced);
+    expect(git(f.repo, 'rev-parse', 'refs/ogc/remote-tags/forgejo/remote-only')).toBe(advanced);
+    expect(git(f.repo, 'tag', '--list')).toBe('release');
+    expect(git(f.repo, 'rev-parse', 'refs/tags/release')).toBe(f.initial);
+    expect(f.lifecycle.runner.getSchedulerDiagnostics().filter((entry) => entry.kind === 'background-fetch')).toHaveLength(2);
+  });
+});

@@ -1,0 +1,377 @@
+// @vitest-environment jsdom
+
+import { act, createElement } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { repositoryRunClient } from '@/services/repositoryRunClient';
+import { useRepositoryRun } from './useRepositoryRun';
+import {
+  resetWorkingDirectoryNavigationGuardForTests,
+  setActiveWorkingDirectoryNavigationGuard,
+} from '@/components/working-directory/workingDirectoryNavigationGuard';
+
+describe('useRepositoryRun configuration binding', () => {
+  let host: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    vi.spyOn(repositoryRunClient, 'isAvailable').mockReturnValue(true);
+    vi.spyOn(repositoryRunClient, 'getState').mockResolvedValue({ success: true, data: null } as any);
+    vi.spyOn(repositoryRunClient, 'watchConfig').mockResolvedValue({ success: true, data: true });
+    vi.spyOn(repositoryRunClient, 'onConfigChanged').mockReturnValue(vi.fn());
+    vi.spyOn(repositoryRunClient, 'onEvent').mockReturnValue(vi.fn());
+  });
+
+  afterEach(() => {
+    resetWorkingDirectoryNavigationGuardForTests();
+    act(() => root.unmount());
+    host.remove();
+    vi.restoreAllMocks();
+  });
+
+  it('clears the old configuration and ignores a late response after switching repositories', async () => {
+    let resolveFirstConfig: ((value: any) => void) | undefined;
+    vi.spyOn(repositoryRunClient, 'getConfig').mockImplementation((repoPath) =>
+      repoPath === 'C:/repo-a'
+        ? new Promise((resolve) => {
+            resolveFirstConfig = resolve;
+          })
+        : new Promise<void>(() => {}),
+    );
+    let current: ReturnType<typeof useRepositoryRun> | null = null;
+    const Harness = ({ activeRepo }: { activeRepo: string | null }) => {
+      current = useRepositoryRun({ activeRepo, triggerRefresh: vi.fn() });
+      return null;
+    };
+
+    await act(async () => root.render(createElement(Harness, { activeRepo: 'C:/repo-a' })));
+    await act(async () => root.render(createElement(Harness, { activeRepo: 'C:/repo-b' })));
+    expect(current?.activeRunConfig).toBeNull();
+
+    await act(async () => resolveFirstConfig?.({ success: true, data: { configPath: 'C:/repo-a/.ogc.json' } }));
+
+    expect(current?.activeRunConfig).toBeNull();
+  });
+
+  it('refreshes the active configuration after a watched run.json change', async () => {
+    const configChanged = vi.fn();
+    vi.mocked(repositoryRunClient.onConfigChanged).mockImplementation((handler) => {
+      configChanged.mockImplementation(handler);
+      return vi.fn();
+    });
+    const getConfig = vi
+      .spyOn(repositoryRunClient, 'getConfig')
+      .mockResolvedValue({ success: true, data: { configPath: 'C:/repo-a/.Open-Git-Control/run.json' } } as any);
+    let current: ReturnType<typeof useRepositoryRun> | null = null;
+    const Harness = () => {
+      current = useRepositoryRun({ activeRepo: 'C:/repo-a', triggerRefresh: vi.fn() });
+      return null;
+    };
+
+    await act(async () => {
+      root.render(createElement(Harness));
+      await Promise.resolve();
+    });
+    expect(repositoryRunClient.watchConfig).toHaveBeenCalledWith('C:/repo-a');
+    const callsBeforeChange = getConfig.mock.calls.length;
+
+    await act(async () => {
+      configChanged('C:/repo-a');
+      await Promise.resolve();
+    });
+
+    expect(getConfig).toHaveBeenCalledTimes(callsBeforeChange + 1);
+    expect(current?.activeRunConfig).toEqual({ configPath: 'C:/repo-a/.Open-Git-Control/run.json' });
+  });
+
+  it('ignores run configuration changes for repositories that are no longer active', async () => {
+    const configChanged = vi.fn();
+    vi.mocked(repositoryRunClient.onConfigChanged).mockImplementation((handler) => {
+      configChanged.mockImplementation(handler);
+      return vi.fn();
+    });
+    const getConfig = vi
+      .spyOn(repositoryRunClient, 'getConfig')
+      .mockResolvedValue({ success: true, data: { configPath: 'C:/repo-b/.Open-Git-Control/run.json' } } as any);
+    const Harness = ({ activeRepo }: { activeRepo: string }) => {
+      useRepositoryRun({ activeRepo, triggerRefresh: vi.fn() });
+      return null;
+    };
+
+    await act(async () => {
+      root.render(createElement(Harness, { activeRepo: 'C:/repo-a' }));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      root.render(createElement(Harness, { activeRepo: 'C:/repo-b' }));
+      await Promise.resolve();
+    });
+    const callsBeforeChange = getConfig.mock.calls.length;
+
+    await act(async () => {
+      configChanged('C:/repo-a');
+      await Promise.resolve();
+    });
+
+    expect(getConfig).toHaveBeenCalledTimes(callsBeforeChange);
+  });
+
+  it('bounds output received from both getState and full state events by lines and UTF-8 bytes', async () => {
+    const oversizedState = {
+      runId: 'run-1',
+      repoPath: 'C:/repo-a',
+      action: 'test',
+      status: 'running',
+      startedAt: Date.now(),
+      activeStepIndex: 0,
+      stepCount: 1,
+      steps: [],
+      output: Array.from({ length: 5_000 }, (_, sequence) => ({
+        sequence,
+        stream: 'stdout',
+        text: 'x'.repeat(1024),
+        timestamp: Date.now(),
+        stepIndex: 0,
+      })),
+    } as any;
+    vi.mocked(repositoryRunClient.getState).mockResolvedValue({ success: true, data: oversizedState });
+    let eventHandler: ((event: any) => void) | undefined;
+    vi.mocked(repositoryRunClient.onEvent).mockImplementation((handler) => {
+      eventHandler = handler;
+      return vi.fn();
+    });
+    vi.spyOn(repositoryRunClient, 'getConfig').mockImplementation(() => new Promise<void>(() => {}));
+    let current: ReturnType<typeof useRepositoryRun> | null = null;
+    const triggerRefresh = vi.fn();
+    const Harness = () => {
+      current = useRepositoryRun({ activeRepo: 'C:/repo-a', triggerRefresh });
+      return null;
+    };
+
+    await act(async () => root.render(createElement(Harness)));
+    await act(async () => await Promise.resolve());
+    const getRetainedBytes = () => current!.runState!.output.reduce((total, line) => total + new TextEncoder().encode(line.text).length, 0);
+    expect(current!.runState!.output.length).toBeLessThanOrEqual(4_000);
+    expect(getRetainedBytes()).toBeLessThanOrEqual(2 * 1024 * 1024);
+
+    await act(async () => eventHandler?.({ type: 'state', state: { ...oversizedState, runId: 'run-2' } }));
+    expect(current!.runState!.runId).toBe('run-2');
+    expect(current!.runState!.output.length).toBeLessThanOrEqual(4_000);
+    expect(getRetainedBytes()).toBeLessThanOrEqual(2 * 1024 * 1024);
+  });
+
+  it('does not open the run console until dirty-editor navigation is allowed', async () => {
+    vi.mocked(repositoryRunClient.getState).mockResolvedValue({
+      success: true,
+      data: { runId: 'run-1', repoPath: 'C:/repo-a', status: 'succeeded', output: [] },
+    } as any);
+    vi.spyOn(repositoryRunClient, 'getConfig').mockResolvedValue({ success: true, data: null } as any);
+    let current: ReturnType<typeof useRepositoryRun> | null = null;
+    const triggerRefresh = vi.fn();
+    const Harness = () => {
+      current = useRepositoryRun({ activeRepo: 'C:/repo-a', triggerRefresh });
+      return null;
+    };
+    await act(async () => root.render(createElement(Harness)));
+    await vi.waitFor(() => expect(current?.runState?.runId).toBe('run-1'));
+
+    let proceed: (() => void) | undefined;
+    setActiveWorkingDirectoryNavigationGuard((_target, next) => (proceed = next));
+    act(() => current!.openRunConsole());
+    expect(current!.isRunConsoleOpen).toBe(false);
+    act(() => proceed?.());
+    expect(current!.isRunConsoleOpen).toBe(true);
+  });
+
+  it('retains batched output in order, applies the log limit and ignores other runs', async () => {
+    vi.spyOn(repositoryRunClient, 'getConfig').mockResolvedValue({ success: true, data: null } as any);
+    let handler!: Parameters<typeof repositoryRunClient.onEvent>[0];
+    vi.mocked(repositoryRunClient.onEvent).mockImplementation((callback) => {
+      handler = callback;
+      return vi.fn();
+    });
+    let current: ReturnType<typeof useRepositoryRun> | null = null;
+    const triggerRefresh = vi.fn();
+    const Harness = () => {
+      current = useRepositoryRun({ activeRepo: 'C:/repo-a', triggerRefresh });
+      return null;
+    };
+    await act(async () => root.render(createElement(Harness)));
+    const state = {
+      runId: 'run-1',
+      repoPath: 'C:/repo-a',
+      action: 'build',
+      status: 'running',
+      startedAt: 0,
+      activeStepIndex: 0,
+      stepCount: 1,
+      steps: [],
+      output: [],
+    } as const;
+    await act(async () => handler({ type: 'state', state: { ...state, steps: [], output: [] } }));
+    const lines = Array.from({ length: 5_000 }, (_, i) => ({ sequence: i + 1, stream: 'stdout' as const, text: `line-${i}`, timestamp: 0, stepIndex: 0 }));
+    await act(async () => handler({ type: 'output-batch', runId: 'run-1', lines }));
+    expect(current!.runState!.output.map((line) => line.sequence)).toEqual(Array.from({ length: 4_000 }, (_, i) => i + 1001));
+    await act(async () => handler({ type: 'output-batch', runId: 'old-run', lines }));
+    expect(current!.runState!.output.at(-1)?.text).toBe('line-4999');
+  });
+
+  it('does not overwrite a newer run event with a late initial state read', async () => {
+    let resolve!: (value: any) => void;
+    vi.mocked(repositoryRunClient.getState).mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    vi.spyOn(repositoryRunClient, 'getConfig').mockResolvedValue({ success: true, data: null } as any);
+    let handler!: Parameters<typeof repositoryRunClient.onEvent>[0];
+    vi.mocked(repositoryRunClient.onEvent).mockImplementation((callback) => {
+      handler = callback;
+      return vi.fn();
+    });
+    let current: ReturnType<typeof useRepositoryRun> | null = null;
+    const triggerRefresh = vi.fn();
+    const Harness = () => {
+      current = useRepositoryRun({ activeRepo: 'C:/repo-a', triggerRefresh });
+      return null;
+    };
+    await act(async () => root.render(createElement(Harness)));
+    await act(async () => handler({ type: 'state', state: { runId: 'new', status: 'running', repoPath: 'C:/repo-a', output: [] } as any }));
+    await act(async () => resolve({ success: true, data: null }));
+    expect(current!.runState!.runId).toBe('new');
+  });
+
+  it.each([true, false])('merges streamed lines with the initial snapshot without duplicates (early output: %s)', async (early) => {
+    const line = (sequence: number) => ({ sequence, text: `line-${sequence}`, stream: 'stdout' as const, timestamp: 0, stepIndex: 0 });
+    const snapshot = { runId: 'run-1', status: 'running', repoPath: 'C:/repo-a', output: [line(1)] } as any;
+    let resolve!: (value: any) => void;
+    if (early)
+      vi.mocked(repositoryRunClient.getState).mockImplementation(
+        () =>
+          new Promise((done) => {
+            resolve = done;
+          }),
+      );
+    else vi.mocked(repositoryRunClient.getState).mockResolvedValue({ success: true, data: snapshot });
+    vi.spyOn(repositoryRunClient, 'getConfig').mockResolvedValue({ success: true, data: null } as any);
+    let handler!: Parameters<typeof repositoryRunClient.onEvent>[0];
+    vi.mocked(repositoryRunClient.onEvent).mockImplementation((callback) => {
+      handler = callback;
+      return vi.fn();
+    });
+    let current: ReturnType<typeof useRepositoryRun> | null = null;
+    const triggerRefresh = vi.fn();
+    const Harness = () => {
+      current = useRepositoryRun({ activeRepo: 'C:/repo-a', triggerRefresh });
+      return null;
+    };
+    await act(async () => root.render(createElement(Harness)));
+    await act(async () => handler({ type: 'output-batch', runId: 'run-1', lines: [line(1), line(2)] }));
+    if (early) await act(async () => resolve({ success: true, data: snapshot }));
+    expect(current!.runState!.output.map((line) => line.sequence)).toEqual([1, 2]);
+    await act(async () => handler({ type: 'output', runId: 'run-1', line: line(2) }));
+    expect(current!.runState!.output.map((line) => line.sequence)).toEqual([1, 2]);
+  });
+
+  it('keeps a completed run when its start response arrives after the completion event', async () => {
+    vi.spyOn(repositoryRunClient, 'getConfig').mockResolvedValue({ success: true, data: null } as any);
+    let resolve!: (value: any) => void;
+    vi.spyOn(repositoryRunClient, 'start').mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    let handler!: Parameters<typeof repositoryRunClient.onEvent>[0];
+    vi.mocked(repositoryRunClient.onEvent).mockImplementation((callback) => {
+      handler = callback;
+      return vi.fn();
+    });
+    let current: ReturnType<typeof useRepositoryRun> | null = null;
+    const triggerRefresh = vi.fn();
+    const Harness = () => {
+      current = useRepositoryRun({ activeRepo: 'C:/repo-a', triggerRefresh });
+      return null;
+    };
+    await act(async () => root.render(createElement(Harness)));
+    let start!: Promise<boolean>;
+    await act(async () => {
+      start = current!.startRun('build');
+      await Promise.resolve();
+    });
+    const state = { runId: 'run-1', repoPath: 'C:/repo-a', status: 'succeeded', output: [] };
+    await act(async () => handler({ type: 'state', state: state as any }));
+    await act(async () => {
+      resolve({ success: true, data: { ...state, status: 'running' } });
+      await start;
+    });
+    expect(current!.runState!.status).toBe('succeeded');
+    expect(triggerRefresh).toHaveBeenCalledOnce();
+  });
+
+  it('explains missing programs before opening the console and retries the same action after installation', async () => {
+    vi.spyOn(repositoryRunClient, 'getConfig').mockResolvedValue({ success: true, data: null } as any);
+    const start = vi
+      .spyOn(repositoryRunClient, 'start')
+      .mockResolvedValueOnce({ success: false, error: 'RUN_PREREQUISITES:{"missing":["npm"],"unknown":[]}' })
+      .mockResolvedValueOnce({ success: true, data: { runId: 'run-new', repoPath: 'C:/repo-a', action: 'build', status: 'running', output: [] } } as any);
+    const notify = vi.fn().mockReturnValue(1);
+    let current: ReturnType<typeof useRepositoryRun> | null = null;
+    const Harness = () => {
+      current = useRepositoryRun({ activeRepo: 'C:/repo-a', triggerRefresh: vi.fn(), notify });
+      return null;
+    };
+    await act(async () => root.render(createElement(Harness)));
+    await act(async () => {
+      expect(await current!.startRun('build')).toBe(false);
+    });
+    expect(current!.isRunConsoleOpen).toBe(false);
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ msg: expect.stringContaining('Required programs are missing: npm'), errorExplained: true }));
+    await act(async () => {
+      notify.mock.calls[0][0].actions[0].onClick();
+      await Promise.resolve();
+    });
+    expect(start.mock.calls).toEqual([
+      ['C:/repo-a', 'build'],
+      ['C:/repo-a', 'build'],
+    ]);
+    expect(current!.isRunConsoleOpen).toBe(true);
+  });
+
+  it('ignores double clicks and a late prerequisite failure for a repository that was left', async () => {
+    vi.spyOn(repositoryRunClient, 'getConfig').mockResolvedValue({ success: true, data: null } as any);
+    let resolve!: (result: any) => void;
+    const start = vi.spyOn(repositoryRunClient, 'start').mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    const notify = vi.fn().mockReturnValue(1);
+    let current: ReturnType<typeof useRepositoryRun> | null = null;
+    const Harness = ({ activeRepo }: { activeRepo: string }) => {
+      current = useRepositoryRun({ activeRepo, triggerRefresh: vi.fn(), notify });
+      return null;
+    };
+    await act(async () => root.render(createElement(Harness, { activeRepo: 'C:/repo-a' })));
+    let pending!: Promise<boolean>;
+    await act(async () => {
+      pending = current!.startRun('test');
+      expect(await current!.startRun('test')).toBe(false);
+      await Promise.resolve();
+    });
+    expect(start).toHaveBeenCalledOnce();
+    await act(async () => root.render(createElement(Harness, { activeRepo: 'C:/repo-b' })));
+    await act(async () => {
+      resolve({ success: false, error: 'RUN_PREREQUISITES:{"missing":["cargo"],"unknown":[]}' });
+      await pending;
+    });
+    expect(notify).not.toHaveBeenCalled();
+    expect(current!.isRunConsoleOpen).toBe(false);
+  });
+});

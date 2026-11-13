@@ -1,0 +1,234 @@
+// @vitest-environment jsdom
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { I18nProvider } from '@/i18n';
+import { AnalyticsCoupling } from '../AnalyticsCoupling';
+import { relaxCouplingScene, type CouplingForceRequest, type CouplingForceResult } from '../analyticsCouplingForce';
+import * as couplingForce from '../analyticsCouplingForce';
+import type { AnalyticsCoupling as Pair } from '@/shared/ipc/repositoryAnalytics';
+import { clearCouplingSessions } from '../analyticsCouplingSession';
+
+class LayoutWorker {
+  static tasks: LayoutWorker[] = [];
+  static failMessage = false;
+  onmessage?: (event: MessageEvent<CouplingForceResult>) => void;
+  onerror?: (event: ErrorEvent) => void;
+  onmessageerror?: () => void;
+  request!: CouplingForceRequest;
+  private scene?: CouplingForceResult['scene'];
+  terminated = false;
+  constructor(
+    public url: URL,
+    public options: WorkerOptions,
+  ) {
+    LayoutWorker.tasks.push(this);
+  }
+  postMessage(request: CouplingForceRequest) {
+    if (LayoutWorker.failMessage) throw new Error('Worker message failed');
+    this.request = request;
+  }
+  terminate() {
+    this.terminated = true;
+  }
+  deliver(done = true) {
+    // Replaying this worker's result must not run the same simulation again.
+    this.scene ??= relaxCouplingScene(this.request.pairs, this.request.seed, this.request.anchors);
+    this.onmessage?.({
+      data: { scene: this.scene, done },
+    } as MessageEvent<CouplingForceResult>);
+  }
+}
+let host: HTMLDivElement, root: Root;
+const rows: Pair[] = Array.from({ length: 120 }, (_, index) => ({ first: 'hub.ts', second: `file-${index}.ts`, commits: 4, share: 0.5 }));
+const render = (value = rows, loading = false, sessionKey?: string) =>
+  act(() =>
+    root.render(
+      <I18nProvider language="en">
+        <AnalyticsCoupling rows={value} maxCommits={4} loading={loading} onPath={vi.fn()} sessionKey={sessionKey} />
+      </I18nProvider>,
+    ),
+  );
+const positions = () => [...host.querySelectorAll<HTMLElement>('.analytics-coupling-node')].map((node) => [node.dataset.path, node.style.left, node.style.top]);
+const camera = () => host.querySelector<HTMLElement>('.analytics-coupling-scene')!.style.transform;
+const waitForFallback = () =>
+  vi.waitFor(
+    async () => {
+      await act(async () => {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 0);
+        });
+      });
+      expect(host.querySelector('.analytics-coupling-network')?.getAttribute('aria-busy')).toBe('false');
+    },
+    { timeout: 10_000 },
+  );
+beforeEach(() => {
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  LayoutWorker.tasks = [];
+  LayoutWorker.failMessage = false;
+  clearCouplingSessions();
+  vi.stubGlobal('Worker', LayoutWorker);
+  host = document.createElement('div');
+  document.body.append(host);
+  root = createRoot(host);
+});
+afterEach(async () => {
+  await act(async () => root.unmount());
+  host.remove();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe('background coupling force layout', { timeout: 15_000 }, () => {
+  it('uses a cancellable module worker and freezes the scene after settling without reheating for changed counts', () => {
+    render();
+    const task = LayoutWorker.tasks[0];
+    expect(task.options.type).toBe('module');
+    expect(task.request.pairs).toHaveLength(120);
+    const seed = positions();
+    act(() => task.deliver(false));
+    expect(positions()).not.toEqual(seed);
+    act(() => task.deliver());
+    expect(task.terminated).toBe(true);
+    const stable = positions(),
+      view = camera();
+    render([...rows].reverse().map((pair) => ({ ...pair, commits: 8, share: 0.75 })));
+    expect(LayoutWorker.tasks).toHaveLength(1);
+    expect(positions()).toEqual(stable);
+    expect(camera()).toBe(view);
+  });
+  it('stops drifting as soon as the user zooms, ignores queued replies, and anchors old nodes when more files arrive', () => {
+    render();
+    const first = LayoutWorker.tasks[0];
+    act(() => first.deliver(false));
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="Zoom in"]')!.click());
+    const stable = positions(),
+      view = camera();
+    expect(first.terminated).toBe(true);
+    act(() => first.deliver());
+    expect(positions()).toEqual(stable);
+    expect(camera()).toBe(view);
+    const next = [...rows, { first: 'hub.ts', second: 'added.ts', commits: 3, share: 0.3 }];
+    render(next);
+    const second = LayoutWorker.tasks[1];
+    expect(second.request.anchors).toHaveLength(121);
+    act(() => second.deliver());
+    const current = new Map(positions().map(([path, x, y]) => [path, [x, y]]));
+    for (const [path, x, y] of stable) expect(current.get(path)).toEqual([x, y]);
+    expect(camera()).toBe(view);
+    expect(host.querySelectorAll('.analytics-coupling-edge')).toHaveLength(121);
+  });
+  it('terminates old jobs on topology changes and ignores old results after a new job completes', () => {
+    render();
+    const old = LayoutWorker.tasks[0];
+    render([{ first: 'other/a.ts', second: 'other/b.ts', commits: 3, share: 0.4 }]);
+    expect(old.terminated).toBe(true);
+    act(() => LayoutWorker.tasks[1].deliver());
+    const current = positions();
+    act(() => old.deliver());
+    expect(positions()).toEqual(current);
+    expect(current.map(([path]) => path)).toEqual(['other/a.ts', 'other/b.ts']);
+  });
+  it('relaxes the entire initially loading graph before freezing positions for subsequent background additions', () => {
+    render(rows.slice(0, 60), true);
+    act(() => LayoutWorker.tasks[0].deliver());
+    render(rows, true);
+    expect(LayoutWorker.tasks[1].request.anchors).toHaveLength(0);
+    act(() => LayoutWorker.tasks[1].deliver());
+    render(rows, false);
+    expect(LayoutWorker.tasks).toHaveLength(2);
+    const stable = positions();
+    render([...rows, { first: 'hub.ts', second: 'new.ts', commits: 3, share: 0.2 }], true);
+    expect(LayoutWorker.tasks[2].request.anchors).toHaveLength(121);
+    act(() => LayoutWorker.tasks[2].deliver());
+    const current = new Map(positions().map(([path, x, y]) => [path, [x, y]]));
+    for (const [path, x, y] of stable) expect(current.get(path)).toEqual([x, y]);
+  });
+  it('respects reduced motion and cancels active calculations on unmount', () => {
+    vi.stubGlobal('matchMedia', () => ({ matches: true }));
+    render();
+    const task = LayoutWorker.tasks[0],
+      seed = positions();
+    act(() => task.deliver(false));
+    expect(positions()).toEqual(seed);
+    act(() => root.unmount());
+    expect(task.terminated).toBe(true);
+    root = createRoot(host);
+  });
+  it('retains the complete layout if worker creation is unavailable', async () => {
+    vi.stubGlobal(
+      'Worker',
+      class {
+        constructor() {
+          throw new Error('Worker unavailable');
+        }
+      },
+    );
+    render();
+    expect(positions()).toHaveLength(121);
+    await waitForFallback();
+  });
+  it.each(['error', 'messageerror', 'postMessage'] as const)('cleans up a %s failure and settles the complete fallback graph', async (failure) => {
+    LayoutWorker.failMessage = failure === 'postMessage';
+    render();
+    const task = LayoutWorker.tasks[0];
+    act(() => {
+      if (failure === 'error') task.onerror?.({ preventDefault: vi.fn() } as unknown as ErrorEvent);
+      if (failure === 'messageerror') task.onmessageerror?.();
+    });
+    expect(task.terminated).toBe(true);
+    await waitForFallback();
+    expect(positions()).toHaveLength(121);
+  });
+  it('cancels a fallback after user interaction and ignores its late result', async () => {
+    let resolve!: (scene: CouplingForceResult['scene']) => void;
+    let signal: AbortSignal | undefined;
+    vi.spyOn(couplingForce, 'relaxCouplingSceneAsync').mockImplementation((_pairs, _seed, _anchors, control) => {
+      signal = control;
+      return new Promise((done) => {
+        resolve = done;
+      });
+    });
+    render();
+    const task = LayoutWorker.tasks[0];
+    act(() => task.onerror?.({ preventDefault: vi.fn() } as unknown as ErrorEvent));
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="Zoom in"]')!.click());
+    const stable = positions();
+    expect(signal?.aborted).toBe(true);
+    await act(async () => resolve(relaxCouplingScene(task.request.pairs, task.request.seed, task.request.anchors)));
+    expect(positions()).toEqual(stable);
+  });
+  it('restores a settled layout and camera on reopening without starting any new force worker', () => {
+    render(rows, false, 'repo-and-filter');
+    act(() => LayoutWorker.tasks[0].deliver());
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="Zoom in"]')!.click());
+    const stable = positions(),
+      view = camera();
+    act(() => root.render(null));
+    render(rows, false, 'repo-and-filter');
+    expect(LayoutWorker.tasks).toHaveLength(1);
+    expect(positions()).toEqual(stable);
+    expect(camera()).toBe(view);
+    expect(host.querySelector('.analytics-coupling-network')?.getAttribute('aria-busy')).toBe('false');
+  });
+  it('does not restart layout when a completed initial batch is later marked fully loaded', () => {
+    render(rows, true, 'loading-then-finished');
+    act(() => LayoutWorker.tasks[0].deliver());
+    render(rows, false, 'loading-then-finished');
+    const stable = positions();
+    act(() => root.render(null));
+    render(rows, false, 'loading-then-finished');
+    expect(LayoutWorker.tasks).toHaveLength(1);
+    expect(positions()).toEqual(stable);
+  });
+  it('retains positions without simulating when only links between existing files change', () => {
+    render();
+    act(() => LayoutWorker.tasks[0].deliver());
+    const stable = positions();
+    render([...rows, { first: 'file-0.ts', second: 'file-1.ts', commits: 3, share: 0.5 }]);
+    expect(LayoutWorker.tasks).toHaveLength(1);
+    expect(positions()).toEqual(stable);
+    expect(host.querySelectorAll('.analytics-coupling-edge')).toHaveLength(121);
+  });
+});

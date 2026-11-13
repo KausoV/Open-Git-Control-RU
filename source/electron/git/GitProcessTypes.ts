@@ -1,0 +1,91 @@
+import { execFile } from 'child_process';
+import * as util from 'util';
+import type { GitJobKind } from '../GitScheduler';
+
+const execFileAsync = util.promisify(execFile);
+
+export type ExecFileAsyncResult = { stdout: string; stderr: string };
+
+export type GitExecFileOptions = {
+  cwd: string;
+  maxBuffer: number;
+  env: NodeJS.ProcessEnv;
+  windowsHide?: boolean;
+  signal?: AbortSignal;
+};
+
+export type ExecFileAsyncRunner = (file: string, args: string[], options: GitExecFileOptions) => Promise<ExecFileAsyncResult>;
+
+export const defaultExecFileAsyncRunner = execFileAsync as ExecFileAsyncRunner;
+
+export type GitRunOptions = {
+  envOverrides?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  requestedKind?: GitJobKind;
+  coalesceKey?: string;
+  /** Stream diagnostics while preserving porcelain stdout and non-zero ref results. */
+  onOutput?: (line: string) => void;
+};
+
+export type GitBufferRunOptions = {
+  signal?: AbortSignal;
+  /** Internal bounded sampling; an intentional truncation is a successful read. */
+  allowTruncation?: boolean;
+  input?: string | Buffer;
+  maxBytes: number;
+  tooLargeMessage: string;
+  requestedKind?: GitJobKind;
+  commandName?: string;
+  envOverrides?: NodeJS.ProcessEnv;
+};
+
+export type GitInputRunOptions = {
+  signal?: AbortSignal;
+  requestedKind?: GitJobKind;
+  commandName?: string;
+  envOverrides?: NodeJS.ProcessEnv;
+};
+
+export type GitTransferOptions = {
+  envOverrides?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  /** Only automatic fetches may yield their network lane to foreground work. */
+  backgroundFetch?: boolean;
+};
+
+export type GitLineFragment = { first: boolean; last: boolean };
+export type GitLineHandler = (line: string, fragment?: GitLineFragment) => void | Promise<void>;
+export type GitLineStreamOptions = {
+  requestedKind?: GitJobKind;
+  redactOutput?: boolean;
+  envOverrides?: NodeJS.ProcessEnv;
+  /** Internal raw consumers must explicitly handle continuations of the same logical line. */
+  fragmentLongLines?: boolean;
+};
+
+/** Non-zero exits still carry porcelain records for independently published refs. */
+export type GitProcessResult = { stdout: string; stderr: string; exitCode: number };
+
+export type DiffPreviewResult = {
+  text: string;
+  truncated: boolean;
+  bytes: number;
+  lines: number;
+};
+
+export type GitCloneProgressResult = {
+  success: boolean;
+  error?: string;
+};
+
+export const readGitProcessErrorText = (error: unknown, key: 'stdout' | 'stderr' | 'message' | 'name' | 'code'): string => {
+  if (!error || typeof error !== 'object') return '';
+  const value = (error as Record<string, unknown>)[key];
+  return typeof value === 'string' ? value : String(value ?? '');
+};
+
+export const createAbortError = (message: string): Error => {
+  const error = new Error(message);
+  error.name = 'AbortError';
+  return error;
+};

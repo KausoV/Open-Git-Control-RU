@@ -1,0 +1,48 @@
+import { normalizeRepoPathKey } from '@/utils/repoPath';
+import { formatCommitSubject, parseCommitSubject, type CommitSubject } from './commitSubject';
+
+export type CommitFormDraft = {
+  commitMsg: string;
+  commitDescription: string;
+  subject: CommitSubject;
+};
+
+const commitFormDraftsByRepo = new Map<string, CommitFormDraft>();
+
+const getRepoDraftKey = (repoPath: string | null): string => (repoPath ? normalizeRepoPathKey(repoPath) : '');
+
+const createDefaultDraft = (commitTemplate: string): CommitFormDraft => {
+  const subject = parseCommitSubject(commitTemplate || '');
+  return { commitMsg: subject.type ? formatCommitSubject(subject) : commitTemplate || '', commitDescription: '', subject };
+};
+
+export const getCommitFormDraft = (repoPath: string | null, commitTemplate: string): CommitFormDraft => {
+  const key = getRepoDraftKey(repoPath);
+  if (!key) return createDefaultDraft(commitTemplate);
+
+  const existing = commitFormDraftsByRepo.get(key);
+  if (existing) return existing;
+
+  const draft = createDefaultDraft(commitTemplate);
+  commitFormDraftsByRepo.set(key, draft);
+  return draft;
+};
+
+export const updateCommitFormDraft = (repoPath: string | null, patch: Partial<CommitFormDraft>, commitTemplate = ''): CommitFormDraft => {
+  const key = getRepoDraftKey(repoPath);
+  const current = key ? commitFormDraftsByRepo.get(key) || createDefaultDraft(commitTemplate) : createDefaultDraft(commitTemplate);
+  const next = { ...current, ...patch };
+  if (patch.subject !== undefined) next.commitMsg = formatCommitSubject(patch.subject);
+  else if (patch.commitMsg !== undefined) {
+    next.subject = parseCommitSubject(patch.commitMsg);
+    if (next.subject.type) next.commitMsg = formatCommitSubject(next.subject);
+  }
+  if (key) commitFormDraftsByRepo.set(key, next);
+  return next;
+};
+
+export const resetCommitFormDraft = (repoPath: string | null): CommitFormDraft => updateCommitFormDraft(repoPath, createDefaultDraft(''));
+
+export const clearCommitFormDraftsForTests = () => {
+  commitFormDraftsByRepo.clear();
+};

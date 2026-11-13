@@ -1,0 +1,197 @@
+import React from 'react';
+import type { RepositoryRunActionId, RepositoryRunConfigStateDto, RepositoryRunStateDto } from '@/types/repositoryRun';
+import { useI18n } from '@/i18n';
+import { RepositoryRunMenuItems } from './RepositoryRunMenu';
+
+export type TopbarMoreMenuView = 'more' | 'moreMerge' | 'moreRun';
+
+type MoreOption = {
+  label: string;
+  hint: string;
+  action: () => void;
+};
+
+type Props = {
+  view: TopbarMoreMenuView;
+  setView: (view: TopbarMoreMenuView | null) => void;
+  activeRepo: string | null;
+  isGitActionRunning: boolean;
+  branchCount: number;
+  pullOptions: MoreOption[];
+  pushOptions: MoreOption[];
+  renderMergePicker: () => React.ReactNode;
+  onStageCommit: () => void;
+  onOpenReleaseCreator: () => void;
+  activeRunConfig: RepositoryRunConfigStateDto | null;
+  repositoryRun: RepositoryRunStateDto | null;
+  onStartRepositoryRun: (action: RepositoryRunActionId) => Promise<boolean>;
+  onStopRepositoryRun: () => Promise<boolean>;
+  onOpenRunConsole: () => void;
+  onOpenRunSettings: () => void;
+  onOpenSecretScanAllowlist?: () => void;
+  onOpenRemoteConfig?: () => void;
+  onOpenRepositoryAnalytics?: () => void;
+  onPublishRepository?: () => void;
+};
+
+export const TopbarMoreMenu: React.FC<Props> = ({
+  view,
+  setView,
+  activeRepo,
+  isGitActionRunning,
+  branchCount,
+  pullOptions,
+  pushOptions,
+  renderMergePicker,
+  onStageCommit,
+  onOpenReleaseCreator,
+  activeRunConfig,
+  repositoryRun,
+  onStartRepositoryRun,
+  onStopRepositoryRun,
+  onOpenRunConsole,
+  onOpenRunSettings,
+  onOpenSecretScanAllowlist,
+  onOpenRemoteConfig,
+  onOpenRepositoryAnalytics,
+  onPublishRepository,
+}) => {
+  const { t, tr } = useI18n();
+
+  if (view === 'moreMerge') {
+    return (
+      <div className="topbar-dropdown topbar-more-dropdown">
+        <button
+          type="button"
+          className="topbar-dropdown-item topbar-more-back"
+          onClick={() => {
+            setView('more');
+          }}
+        >
+          <span className="topbar-dropdown-item-label">{t('generated.components.topbar.topbaractions.back_to_actions_db752816')}</span>
+        </button>
+        <div className="topbar-dropdown-sep" />
+        {renderMergePicker()}
+      </div>
+    );
+  }
+
+  if (view === 'moreRun') {
+    return (
+      <div className="topbar-dropdown topbar-more-dropdown">
+        <button type="button" className="topbar-dropdown-item topbar-more-back" onClick={() => setView('more')}>
+          <span className="topbar-dropdown-item-label">{t('generated.components.topbar.topbaractions.back_to_actions_db752816')}</span>
+        </button>
+        <div className="topbar-dropdown-sep" />
+        <RepositoryRunMenuItems
+          activeRunConfig={activeRunConfig}
+          repositoryRun={repositoryRun}
+          onStart={onStartRepositoryRun}
+          onStop={onStopRepositoryRun}
+          onOpenConsole={onOpenRunConsole}
+          onOpenSettings={onOpenRunSettings}
+          onClose={() => setView(null)}
+        />
+      </div>
+    );
+  }
+
+  const runOption = (option: MoreOption) => {
+    setView(null);
+    option.action();
+  };
+
+  return (
+    <div className="topbar-dropdown topbar-more-dropdown">
+      <div className="topbar-dropdown-header">{t('generated.components.topbar.topbaractions.more_actions_a53b5e21')}</div>
+      <button
+        className="topbar-dropdown-item"
+        disabled={!activeRepo || !onOpenRepositoryAnalytics}
+        onClick={() => {
+          setView(null);
+          onOpenRepositoryAnalytics?.();
+        }}
+      >
+        <span className="topbar-dropdown-item-label">{tr('Statistik & Analyse', 'Statistics & analytics')}</span>
+        <span className="topbar-dropdown-item-hint">{tr('Lokale Git-Historie auswerten', 'Analyze local Git history')}</span>
+      </button>
+      {onPublishRepository && (
+        <button
+          className="topbar-dropdown-item"
+          disabled={!activeRepo || isGitActionRunning}
+          onClick={() => {
+            setView(null);
+            onPublishRepository();
+          }}
+        >
+          <span className="topbar-dropdown-item-label">{tr('Repository veröffentlichen', 'Publish repository')}</span>
+          <span className="topbar-dropdown-item-hint">{tr('Erstellen, verbinden und hochladen', 'Create, connect and upload')}</span>
+        </button>
+      )}
+      <button
+        className="topbar-dropdown-item"
+        onClick={() => {
+          setView(null);
+          onStageCommit();
+        }}
+        disabled={!activeRepo}
+      >
+        <span className="topbar-dropdown-item-label">{t('generated.components.topbar.topbaractions.stage_commit_77275475')}</span>
+        <span className="topbar-dropdown-item-hint">{t('generated.components.topbar.topbaractions.open_working_directory_48559e72')}</span>
+      </button>
+      <button className="topbar-dropdown-item" onClick={() => setView('moreMerge')} disabled={!activeRepo || isGitActionRunning || branchCount === 0}>
+        <span className="topbar-dropdown-item-label">{t('generated.components.topbar.topbaractions.merge_branch_8c3efbb0')}</span>
+        <span className="topbar-dropdown-item-hint">{tr('Quelle, Ziel und Wirkung auswählen', 'Choose source, target and behavior')}</span>
+      </button>
+      <button className="topbar-dropdown-item" data-topbar-more-run onClick={() => setView('moreRun')} disabled={!activeRepo}>
+        <span className="topbar-dropdown-item-label">{tr('Run', 'Run')}</span>
+      </button>
+      <button
+        className="topbar-dropdown-item"
+        onClick={() => {
+          setView(null);
+          onOpenRemoteConfig?.();
+        }}
+        disabled={!activeRepo || !onOpenRemoteConfig}
+      >
+        <span className="topbar-dropdown-item-label">{tr('Remote-Konfiguration', 'Remote configuration')}</span>
+      </button>
+      <button
+        className="topbar-dropdown-item"
+        onClick={() => {
+          setView(null);
+          onOpenSecretScanAllowlist?.();
+        }}
+        disabled={!activeRepo || !onOpenSecretScanAllowlist}
+      >
+        <span className="topbar-dropdown-item-label">{tr('Secret-Scan-Allowlist', 'Secret-scan allowlist')}</span>
+      </button>
+      <button
+        className="topbar-dropdown-item"
+        onClick={() => {
+          setView(null);
+          onOpenReleaseCreator();
+        }}
+        disabled={!activeRepo}
+      >
+        <span className="topbar-dropdown-item-label">{t('generated.components.layout.sidebar.githubconnectedcontent.create_release_f0fffb84')}</span>
+      </button>
+      <div className="topbar-dropdown-sep" />
+      <div className="topbar-dropdown-header">{t('generated.components.topbar.topbaractions.pull_options_021c5024')}</div>
+      {pullOptions.map((option) => (
+        <button key={`more-${option.label}`} className="topbar-dropdown-item" onClick={() => runOption(option)} disabled={!activeRepo || isGitActionRunning}>
+          <span className="topbar-dropdown-item-label">{option.label}</span>
+          <span className="topbar-dropdown-item-hint">{option.hint}</span>
+        </button>
+      ))}
+      <div className="topbar-dropdown-sep" />
+      <div className="topbar-dropdown-header">{t('generated.components.topbar.topbaractions.push_options_f825b016')}</div>
+      {pushOptions.map((option) => (
+        <button key={`more-${option.label}`} className="topbar-dropdown-item" onClick={() => runOption(option)} disabled={!activeRepo || isGitActionRunning}>
+          <span className="topbar-dropdown-item-label">{option.label}</span>
+          <span className="topbar-dropdown-item-hint">{option.hint}</span>
+        </button>
+      ))}
+    </div>
+  );
+};

@@ -1,0 +1,58 @@
+[
+  {
+    "key": "{{0}} {{1}} cannot be preserved. New commits follow your Git signing configuration.",
+    "slot": 1,
+    "values": [
+      "signature",
+      "signatures"
+    ]
+  },
+  {
+    "key": "Select change for {{0}}: {{1}} line {{2}}",
+    "slot": 0,
+    "values": [
+      "staging",
+      "unstaging"
+    ]
+  },
+  {
+    "key": "Select change for {{0}}: {{1}} line {{2}}",
+    "slot": 1,
+    "values": [
+      "old",
+      "new"
+    ]
+  },
+  {
+    "key": "{{0}} {{1}} selected",
+    "slot": 1,
+    "values": [
+      "change",
+      "changes"
+    ]
+  },
+  {
+    "key": "{{0}} on GitHub. Upload {{1}} before creating the release?",
+    "slot": 1,
+    "values": [
+      "it",
+      "them"
+    ]
+  },
+  {
+    "key": "{{0}}: {{1}}.{{2}} A new draft is ready.",
+    "slot": 0,
+    "values": [
+      "Release draft saved",
+      "Release published"
+    ]
+  },
+  {
+    "key": "Git LFS recommended: large {{0}} file ({{1}}). Convert through the context menu.",
+    "slot": 0,
+    "values": [
+      "media/asset",
+      "binary"
+    ]
+  }
+]

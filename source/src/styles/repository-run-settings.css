@@ -1,0 +1,218 @@
+.pane-content:has(.repository-run-config-view) {
+  min-height: 0;
+  overflow: hidden;
+}
+.repository-run-config-view {
+  box-sizing: border-box;
+  height: 100%;
+  overflow: auto;
+  padding: 18px 24px 32px;
+  background: var(--bg-darker);
+}
+.repository-run-config-view--empty {
+  color: var(--text-secondary);
+}
+.repository-run-config-view__eyebrow {
+  color: var(--text-accent);
+  font: 700 0.65rem var(--font-mono);
+  letter-spacing: 0.1em;
+}
+.repository-run-config-view .settings-card-header-row h3 {
+  margin: 5px 0 3px;
+  font-size: 1.15rem;
+}
+.repository-run-config-view__repo-path {
+  margin: 0;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line-subtle);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.settings-card.repository-run-settings {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  width: 100%;
+  padding: 4px 0 8px;
+  border-top: 0;
+}
+.settings-card.repository-run-settings.repository-run-config-view {
+  padding: 18px 24px 32px;
+}
+.settings-card.repository-run-settings > * {
+  grid-column: auto;
+}
+.repository-run-settings .settings-card-header-row {
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+.repository-run-settings .settings-field {
+  max-width: none;
+}
+.repository-run-settings .settings-field select {
+  max-width: none;
+}
+.repository-run-settings__path {
+  margin: -5px 0 2px;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  overflow-wrap: anywhere;
+}
+.repository-run-settings__error {
+  margin: 10px 0;
+  padding: 9px;
+  border: 1px solid var(--status-danger);
+}
+.repository-run-prerequisites {
+  border-bottom: 1px solid var(--line-subtle);
+  padding: 2px 0 12px;
+  font-size: 0.78rem;
+}
+.repository-run-prerequisites__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.repository-run-prerequisites p {
+  color: var(--text-secondary);
+  margin: 8px 0;
+  line-height: 1.5;
+}
+.repository-run-prerequisites ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.repository-run-prerequisites li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.repository-run-prerequisites li small {
+  color: var(--text-muted);
+}
+.repository-run-prerequisites li[data-state='missing'],
+.repository-run-prerequisite-hint {
+  color: var(--status-warning);
+}
+.repository-run-prerequisite-hint {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.68rem;
+  line-height: 1.4;
+  text-align: left;
+}
+.repository-run-settings__templates .staging-tool-btn:has(.repository-run-prerequisite-hint) {
+  flex-direction: column;
+  align-items: flex-start;
+}
+.repository-run-settings__step > .repository-run-prerequisite-hint {
+  margin-top: 9px;
+}
+.repository-run-settings__action {
+  align-self: stretch;
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 2px;
+  border: 1px solid var(--line-subtle);
+  background: var(--bg-dark);
+}
+.repository-run-settings__action-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 0;
+  color: var(--text-primary);
+  background: transparent;
+  text-align: left;
+}
+.repository-run-settings__action-header > span {
+  display: grid;
+  gap: 3px;
+}
+.repository-run-settings__action-header small {
+  color: var(--text-muted);
+  font: 0.68rem var(--font-mono);
+}
+.repository-run-settings__action-body {
+  padding: 0 12px 12px;
+  border-top: 1px solid var(--line-subtle);
+}
+.repository-run-settings__templates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 9px 0;
+}
+.repository-run-settings__step {
+  padding: 12px;
+  margin-top: 8px;
+  border: 1px solid var(--line-subtle);
+  background: var(--bg-panel);
+}
+.repository-run-settings__step-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.repository-run-settings__select-label {
+  display: grid;
+  gap: 3px;
+  color: var(--text-secondary);
+  font: 0.63rem var(--font-mono);
+}
+.repository-run-settings__select-label select {
+  min-width: 126px;
+}
+.repository-run-settings__step-title input {
+  flex: 1;
+  min-width: 120px;
+}
+.repository-run-settings__platforms {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+.repository-run-settings__platforms label {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px;
+  align-items: center;
+  color: var(--text-secondary);
+  font: 0.72rem var(--font-mono);
+}
+.repository-run-settings__platforms textarea {
+  grid-column: 1 / -1;
+  min-width: 0;
+  resize: vertical;
+}
+@media (max-width: 860px) {
+  .repository-run-settings__platforms {
+    grid-template-columns: 1fr;
+  }
+  .repository-run-settings__step-title {
+    flex-wrap: wrap;
+  }
+}
+@media (max-width: 680px) {
+  .settings-card.repository-run-settings.repository-run-config-view {
+    padding: 14px;
+  }
+  .repository-run-settings .settings-card-header-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .repository-run-settings .settings-inline-actions {
+    flex-wrap: wrap;
+  }
+}

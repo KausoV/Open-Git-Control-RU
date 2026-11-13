@@ -1,0 +1,213 @@
+import { redactGitSensitiveText } from '../git/GitErrorFormatter';
+
+export interface FileHistoryEntry {
+  hash: string;
+  abbrevHash: string;
+  author: string;
+  date: string;
+  subject: string;
+  path?: string;
+}
+
+export interface FileBlameLine {
+  lineNumber: number;
+  commitHash: string;
+  abbrevHash: string;
+  author: string;
+  authorTime: string;
+  summary: string;
+  content: string;
+}
+
+export interface StashEntry {
+  index: number;
+  name: string;
+  hash: string;
+  branch: string;
+  subject: string;
+}
+
+export type ReleaseCommit = {
+  hash: string;
+  shortHash: string;
+  subject: string;
+  author: string;
+  date: string;
+  htmlUrl?: string | null;
+  description?: string;
+};
+
+export const RELEASE_COMMIT_FORMAT = '--format=%H%x1f%h%x1f%s%x1f%an%x1f%aI%x1f%b%x00';
+
+export function parseFileHistory(logOutput: string): FileHistoryEntry[] {
+  if (!logOutput) return [];
+
+  const records = logOutput.split('\x00');
+  const entries: FileHistoryEntry[] = [];
+  let current: FileHistoryEntry | undefined;
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index].replace(/^\r?\n/, '').trim();
+    if (!record) continue;
+
+    // --name-status -z emits one path for ordinary changes and old/new paths
+    // for renames. Consume these as raw tokens: whitespace and separators in
+    // filenames must never be trimmed or interpreted as commit headers.
+    if (current && /^[ACDMRTUXB](?:\d+)?$/.test(record)) {
+      const firstPath = records[++index];
+      const path = /^[RC]/.test(record) ? records[++index] : firstPath;
+      if (path && !current.path) current.path = path;
+      continue;
+    }
+
+    let parts = record.split('\x1f');
+    if (parts.length < 5 && record.includes('\\x1f')) {
+      parts = record.split('\\x1f');
+    }
+    if (parts.length < 5 && record.includes('|')) {
+      parts = record.split('|');
+    }
+
+    const [hashRaw = '', abbrevRaw = '', authorRaw = '', dateRaw = '', ...subjectRest] = parts;
+    const hash = hashRaw.trim();
+    if (parts.length < 5 || !/^[0-9a-f]{7,64}$/i.test(hash)) continue;
+
+    const abbrevHash = (abbrevRaw || '').trim() || hash.slice(0, 8);
+    const author = (authorRaw || '').trim();
+    const date = (dateRaw || '').trim();
+    const subject = subjectRest.join('|').trim();
+
+    current = { hash, abbrevHash, author, date, subject };
+    entries.push(current);
+  }
+  return entries;
+}
+
+export function parseFileBlame(blameOutput: string): FileBlameLine[] {
+  if (!blameOutput.trim()) return [];
+
+  const lines = blameOutput.split('\n');
+  const parsed: FileBlameLine[] = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const header = lines[i]?.trim() || '';
+    const headerMatch = header.match(/^((?:[0-9a-f]{40}|[0-9a-f]{64}))\s+\d+\s+(\d+)\s+\d+$/i);
+
+    if (!headerMatch) {
+      continue;
+    }
+
+    const commitHash = headerMatch[1];
+    const lineNumber = Number(headerMatch[2]);
+    let author = 'Unknown';
+    let authorTime = '';
+    let summary = '';
+    let content = '';
+
+    for (i += 1; i < lines.length; i += 1) {
+      const metaLine = lines[i];
+      if (metaLine.startsWith('\t')) {
+        content = metaLine.slice(1);
+        break;
+      }
+      if (metaLine.startsWith('author ')) {
+        author = metaLine.slice('author '.length).trim() || 'Unknown';
+      } else if (metaLine.startsWith('author-time ')) {
+        const unixSeconds = Number(metaLine.slice('author-time '.length).trim());
+        if (Number.isFinite(unixSeconds)) {
+          authorTime = new Date(unixSeconds * 1000).toISOString();
+        }
+      } else if (metaLine.startsWith('summary ')) {
+        summary = metaLine.slice('summary '.length).trim();
+      }
+    }
+
+    parsed.push({
+      lineNumber,
+      commitHash,
+      abbrevHash: commitHash.slice(0, 8),
+      author,
+      authorTime,
+      summary,
+      content,
+    });
+  }
+
+  return parsed;
+}
+
+export function parseReleaseCommits(raw: string): ReleaseCommit[] {
+  if (!raw.trim()) return [];
+
+  return raw
+    .split(raw.includes('\x00') ? '\x00' : '\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [hash, shortHash, subject, author, date, ...body] = line.split('\x1f');
+      return {
+        hash: String(hash || '').trim(),
+        shortHash: String(shortHash || '').trim(),
+        subject: String(subject || '').trim(),
+        author: String(author || '').trim(),
+        date: String(date || '').trim(),
+        ...(body.length ? { description: body.join('\x1f').trim() } : {}),
+      };
+    })
+    .filter((entry) => Boolean(entry.hash && entry.shortHash && entry.subject));
+}
+
+export function parseStashList(stashOutput: string): StashEntry[] {
+  if (!stashOutput.trim()) return [];
+
+  if (stashOutput.includes('\x1f')) {
+    return stashOutput
+      .split('\x00')
+      .map((record) => record.replace(/^\s+|\s+$/g, ''))
+      .filter(Boolean)
+      .map((record): StashEntry | null => {
+        const [name = '', hash = '', ...subjectParts] = record.split('\x1f');
+        const refMatch = name.match(/^stash@\{(\d+)\}$/);
+        if (!refMatch || !/^[0-9a-f]{7,64}$/i.test(hash)) return null;
+        const subject = subjectParts.join('\x1f').trim();
+        const conventional = subject.match(/^(?:On|WIP on)\s+([^:]+):\s*(.*)$/i);
+        return {
+          index: Number(refMatch[1]),
+          name,
+          hash,
+          branch: conventional?.[1]?.trim() || '',
+          subject: conventional?.[2]?.trim() || subject,
+        };
+      })
+      .filter((entry): entry is StashEntry => entry !== null);
+  }
+
+  return stashOutput
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = line.match(/^stash@\{(\d+)\}:\s*(?:On|WIP on)\s+([^:]+):\s*(.+)$/i);
+      if (!match) {
+        return null;
+      }
+
+      const index = Number(match[1]);
+      const branch = (match[2] || '').trim();
+      const subject = (match[3] || '').trim();
+      const hashMatch = subject.match(/^([0-9a-f]{7,64})\s+/i);
+      const hash = hashMatch ? hashMatch[1] : '';
+
+      return {
+        index,
+        name: `stash@{${index}}`,
+        hash,
+        branch,
+        subject,
+      };
+    })
+    .filter((entry): entry is StashEntry => Boolean(entry));
+}
+
+export function sanitizeRemoteUrl(value: string): string {
+  return redactGitSensitiveText(value).replace(/\[REDACTED\]/g, '***');
+}

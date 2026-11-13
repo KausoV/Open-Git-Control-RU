@@ -1,0 +1,470 @@
+import type { GitJobKind } from '../GitScheduler';
+import { GitScheduler } from '../GitScheduler';
+import { GitErrorFormatter } from './GitErrorFormatter';
+import { GitProcessExecutor } from './GitProcessExecutor';
+import { assertRepoPathAvailable } from './GitRepositoryPath';
+import { GitRepositoryProbe } from './GitRepositoryProbe';
+import { GitSpawnOperations } from './GitSpawnOperations';
+import { readGitDiffPreview } from './GitDiffPreview';
+import type { CommitEditGit } from './CommitEditGit';
+import { runCommitEditProcess } from './CommitEditProcess';
+import { runGitChunkStream } from './GitChunkStream';
+import { gitPollingKey } from './GitPollingKey';
+import { inspectLfsObjectBatch, type ObjectBatchConsumer } from './GitObjectBatch';
+const commandToken = (value: string | undefined): string =>
+  String(value || '')
+    .trim()
+    .toLowerCase();
+import {
+  defaultExecFileAsyncRunner,
+  type DiffPreviewResult,
+  type ExecFileAsyncRunner,
+  type GitBufferRunOptions,
+  type GitCloneProgressResult,
+  type GitExecFileOptions,
+  type GitInputRunOptions,
+  type GitLineHandler,
+  type GitLineStreamOptions,
+  type GitRunOptions,
+  type GitProcessResult,
+  type GitTransferOptions,
+} from './GitProcessTypes';
+
+export {
+  defaultExecFileAsyncRunner,
+  type DiffPreviewResult,
+  type ExecFileAsyncRunner,
+  type GitBufferRunOptions,
+  type GitCloneProgressResult,
+  type GitExecFileOptions,
+  type GitInputRunOptions,
+  type GitRunOptions,
+} from './GitProcessTypes';
+
+const SERIALIZED_GIT_COMMANDS = new Set<string>([
+  'add',
+  'commit',
+  'reset',
+  'checkout',
+  'merge',
+  'rebase',
+  'cherry-pick',
+  'revert',
+  'stash',
+  'clean',
+  'apply',
+  'submodule',
+  'fetch',
+  'pull',
+  'push',
+  'rm',
+  'mv',
+  'init',
+  'update-ref',
+  'worktree',
+  'restore',
+  'switch',
+  'read-tree',
+  'update-index',
+  'write-tree',
+  'mktree',
+  'commit-tree',
+  'pack-refs',
+  'index-pack',
+  'unpack-objects',
+  'replace',
+  'notes',
+  'gc',
+  'repack',
+  'prune',
+  'maintenance',
+  'bisect',
+  'am',
+  'sparse-checkout',
+]);
+
+const BRANCH_LIST_FLAGS = new Set([
+  '-a',
+  '--all',
+  '-r',
+  '--remotes',
+  '-l',
+  '--list',
+  '-v',
+  '--verbose',
+  '--show-current',
+  '--contains',
+  '--no-contains',
+  '--merged',
+  '--no-merged',
+  '--points-at',
+  '--format',
+  '--sort',
+  '--column',
+  '--no-column',
+]);
+
+const BRANCH_MUTATION_FLAGS = new Set([
+  '-d',
+  '-m',
+  '-c',
+  '-f',
+  '--delete',
+  '--move',
+  '--copy',
+  '--force',
+  '--edit-description',
+  '-u',
+  '--set-upstream-to',
+  '--unset-upstream',
+  '--track',
+  '--no-track',
+]);
+
+const optionName = (value: string): string => value.split('=', 1)[0];
+
+const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set(['-c', '-C', '--config-env', '--exec-path', '--git-dir', '--namespace', '--super-prefix', '--work-tree']);
+const GIT_GLOBAL_FLAG_OPTIONS = new Set([
+  '--bare',
+  '--html-path',
+  '--info-path',
+  '--literal-pathspecs',
+  '--man-path',
+  '--no-lazy-fetch',
+  '--no-optional-locks',
+  '--no-pager',
+  '--no-replace-objects',
+  '--paginate',
+  '-p',
+  '--version',
+]);
+
+const commandArguments = (args: string[]): string[] => {
+  let index = 0;
+  while (index < args.length) {
+    const token = String(args[index]);
+    if (GIT_GLOBAL_OPTIONS_WITH_VALUE.has(token)) {
+      index += 2;
+      continue;
+    }
+    const name = optionName(token);
+    if (GIT_GLOBAL_OPTIONS_WITH_VALUE.has(name) || GIT_GLOBAL_FLAG_OPTIONS.has(token)) {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  return args.slice(index);
+};
+
+export class GitRunner {
+  private readonly processExecutor: GitProcessExecutor;
+  private readonly spawnOperations = new GitSpawnOperations();
+  private readonly errorFormatter = new GitErrorFormatter();
+  private readonly repositoryProbe = new GitRepositoryProbe();
+
+  constructor(
+    execFileAsyncRunner: ExecFileAsyncRunner = defaultExecFileAsyncRunner,
+    private readonly scheduler: GitScheduler = new GitScheduler(),
+  ) {
+    this.processExecutor = new GitProcessExecutor(execFileAsyncRunner);
+  }
+  isRepositoryBusy(repoPath: string, commonDirectory?: string): boolean {
+    return this.scheduler.isRepositoryBusy(repoPath, commonDirectory);
+  }
+
+  async run(repoPath: string, args: string[], options: GitRunOptions = {}): Promise<string> {
+    this.assertRepoPathAvailable(repoPath);
+
+    const env = options.envOverrides ? { ...process.env, ...options.envOverrides } : process.env;
+    const execOptions: GitExecFileOptions = {
+      cwd: repoPath,
+      maxBuffer: 20 * 1024 * 1024,
+      env,
+      signal: options.signal,
+    };
+
+    const kind = this.classifyCommand(args, options.requestedKind);
+    return this.schedule(
+      repoPath,
+      kind,
+      args[0] || 'git',
+      (activeSignal) => this.processExecutor.run(repoPath, args, { ...execOptions, signal: activeSignal }),
+      {
+        signal: options.signal,
+        coalesceKey: kind === 'polling' ? gitPollingKey('text', args, options) : undefined,
+      },
+    );
+  }
+
+  async runResult(repoPath: string, args: string[], options: GitRunOptions = {}): Promise<GitProcessResult> {
+    this.assertRepoPathAvailable(repoPath);
+    const kind = this.classifyCommand(args, options.requestedKind);
+    return this.schedule(
+      repoPath,
+      kind,
+      args[0] || 'git',
+      (signal) =>
+        options.onOutput
+          ? this.spawnOperations.streamResult(repoPath, args, options.onOutput, signal, options.envOverrides)
+          : this.processExecutor.runResult(repoPath, args, {
+              cwd: repoPath,
+              maxBuffer: 8 * 1024 * 1024,
+              env: { ...process.env, ...options.envOverrides },
+              signal,
+            }),
+      { signal: options.signal, coalesceKey: kind === 'polling' ? gitPollingKey('result', args, options) : undefined },
+    );
+  }
+
+  /** Keep inspection, isolated rewriting and ref publication in one write lane. */
+  withExclusiveWrite<T>(repoPath: string, command: string, work: (git: CommitEditGit) => Promise<T>, signal?: AbortSignal): Promise<T> {
+    return this.schedule(
+      repoPath,
+      'write',
+      command,
+      async (activeSignal) => {
+        const uninterrupted = new AbortController().signal;
+        const git: CommitEditGit = {
+          signal: activeSignal,
+          prefix: (cwd, args, maxBytes, input) =>
+            this.spawnOperations.runBuffer(cwd, args, { maxBytes, input, tooLargeMessage: 'Git sample is too large.', allowTruncation: true }, activeSignal),
+          run: (cwd, args, options = {}) => {
+            const commandSignal = options.ignoreAbort ? undefined : (options.signal ?? activeSignal);
+            commandSignal?.throwIfAborted();
+            return runCommitEditProcess(cwd, args, commandSignal, options.envOverrides);
+          },
+          buffer: (cwd, args) => {
+            activeSignal.throwIfAborted();
+            return this.spawnOperations.runBuffer(
+              cwd,
+              args,
+              {
+                maxBytes: 20 * 1024 * 1024,
+                tooLargeMessage: 'Commit data is too large.',
+                envOverrides: { GIT_NO_REPLACE_OBJECTS: '1' },
+              },
+              activeSignal,
+            );
+          },
+          input: (cwd, args, input, ignoreAbort = false, envOverrides) => {
+            if (!ignoreAbort) activeSignal.throwIfAborted();
+            return this.spawnOperations.runWithInput(cwd, args, input, ignoreAbort ? uninterrupted : activeSignal, envOverrides);
+          },
+        };
+        return work(git);
+      },
+      { signal },
+    );
+  }
+
+  resolveRepositoryRootSync(candidatePath: string): string {
+    return this.repositoryProbe.resolveRepositoryRootSync(candidatePath);
+  }
+
+  detectIsBareRepositorySync(candidatePath: string): boolean {
+    return this.repositoryProbe.detectIsBareRepositorySync(candidatePath);
+  }
+
+  detectIsBareRepository(candidatePath: string): Promise<boolean> {
+    return this.repositoryProbe.detectIsBareRepository(candidatePath);
+  }
+
+  async runBuffer(repoPath: string, args: string[], options: GitBufferRunOptions): Promise<Buffer> {
+    this.assertRepoPathAvailable(repoPath);
+    const kind = this.classifyCommand(args, options.requestedKind);
+    return this.schedule(repoPath, kind, options.commandName ?? args[0] ?? 'git', (signal) => this.spawnOperations.runBuffer(repoPath, args, options, signal), {
+      signal: options.signal,
+    });
+  }
+
+  async inspectLfsObjects(repoPath: string, objects: string[], options: GitRunOptions = {}, consume?: ObjectBatchConsumer) {
+    this.assertRepoPathAvailable(repoPath);
+    return this.schedule(
+      repoPath,
+      options.requestedKind ?? 'interactive',
+      'cat-file',
+      (signal) => inspectLfsObjectBatch(repoPath, objects, options, signal, consume),
+      {
+        signal: options.signal,
+      },
+    );
+  }
+
+  async runWithInput(repoPath: string, args: string[], input: string | Buffer, options: GitInputRunOptions = {}): Promise<string> {
+    this.assertRepoPathAvailable(repoPath);
+    const kind = this.classifyCommand(args, options.requestedKind);
+    return this.schedule(
+      repoPath,
+      kind,
+      options.commandName ?? args[0] ?? 'git',
+      (signal) => this.spawnOperations.runWithInput(repoPath, args, input, signal, options.envOverrides),
+      { signal: options.signal },
+    );
+  }
+
+  async getDiffPreview(
+    repoPath: string,
+    args: string[],
+    limits: { maxBytes?: number; maxLines?: number } = {},
+    signal?: AbortSignal,
+  ): Promise<DiffPreviewResult> {
+    this.assertRepoPathAvailable(repoPath);
+    return this.schedule(repoPath, 'interactive', args[0] || 'diff', (activeSignal) => this.readDiffPreviewInsideWrite(repoPath, args, limits, activeSignal), {
+      signal,
+    });
+  }
+
+  /** Unscheduled read: only call inside an existing exclusive write job. */
+  async readDiffPreviewInsideWrite(
+    repoPath: string,
+    args: string[],
+    limits: { maxBytes?: number; maxLines?: number },
+    activeSignal: AbortSignal,
+  ): Promise<DiffPreviewResult> {
+    return readGitDiffPreview(this.spawnOperations, this.processExecutor, repoPath, args, limits, activeSignal);
+  }
+
+  async streamLines(repoPath: string, args: string[], onLine: GitLineHandler, signal?: AbortSignal, options: GitLineStreamOptions = {}): Promise<void> {
+    this.assertRepoPathAvailable(repoPath);
+    await this.schedule(
+      repoPath,
+      options.requestedKind ?? 'interactive',
+      args[0] || 'stream',
+      (schedulerSignal) => this.spawnOperations.streamLines(repoPath, args, onLine, schedulerSignal, options),
+      { signal },
+    );
+  }
+
+  async streamRead(
+    repoPath: string,
+    args: string[],
+    onChunk: (chunk: Buffer) => void,
+    signal: AbortSignal,
+    input?: string | Buffer,
+    envOverrides?: NodeJS.ProcessEnv,
+  ): Promise<void> {
+    this.assertRepoPathAvailable(repoPath);
+    await this.schedule(
+      repoPath,
+      'background',
+      args[0] || 'read',
+      (activeSignal) => runGitChunkStream(repoPath, args, onChunk, activeSignal, input, envOverrides),
+      { signal },
+    );
+  }
+
+  async streamOutput(
+    repoPath: string,
+    args: string[],
+    onLine: (line: string) => void,
+    signal?: AbortSignal,
+    options: GitTransferOptions = {},
+  ): Promise<string> {
+    this.assertRepoPathAvailable(repoPath);
+    const kind = options.backgroundFetch === true && commandToken(commandArguments(args)[0]) === 'fetch' ? 'background-fetch' : this.classifyCommand(args);
+    return this.schedule(
+      repoPath,
+      kind,
+      args[0] || 'stream',
+      (schedulerSignal) => this.spawnOperations.streamOutput(repoPath, args, onLine, schedulerSignal, options.envOverrides),
+      {
+        signal: signal ?? options.signal,
+      },
+    );
+  }
+
+  cloneWithProgress(cloneUrl: string, repoPath: string, onProgress: (line: string) => void, options: GitTransferOptions = {}): Promise<GitCloneProgressResult> {
+    return this.spawnOperations.cloneWithProgress(cloneUrl, repoPath, onProgress, options);
+  }
+
+  schedule<T>(
+    repoPath: string,
+    kind: GitJobKind,
+    command: string,
+    run: (signal: AbortSignal) => Promise<T>,
+    options: { coalesceKey?: string; signal?: AbortSignal } = {},
+  ): Promise<T> {
+    return this.scheduler.schedule(repoPath, kind, command, run, options);
+  }
+
+  getSchedulerDiagnostics() {
+    return this.scheduler.getDiagnostics();
+  }
+
+  classifyCommand(args: string[], requestedKind?: GitJobKind): GitJobKind {
+    if (requestedKind) return requestedKind;
+    const commandArgs = commandArguments(args);
+    const primary = commandToken(commandArgs[0]);
+    const secondary = commandToken(commandArgs[1]);
+    if (primary === 'branch') {
+      const flags = commandArgs.slice(1).map((value) => String(value).toLowerCase());
+      if (flags.some((flag) => BRANCH_MUTATION_FLAGS.has(optionName(flag)))) return 'write';
+      if (flags.length === 0 || flags.some((flag) => BRANCH_LIST_FLAGS.has(optionName(flag)))) return 'polling';
+      // A positional branch name creates a branch. Unknown future branch
+      // modes are serialized conservatively instead of racing the ref store.
+      return 'write';
+    }
+    if (primary === 'remote') {
+      return !secondary || ['-v', '--verbose', 'show', 'get-url'].includes(secondary) ? 'polling' : 'write';
+    }
+    if (primary === 'tag') {
+      const isList =
+        commandArgs.length === 1 ||
+        ['-l', '--list', '--contains', '--no-contains', '--merged', '--no-merged', '--points-at', '--sort', '--format'].includes(optionName(secondary));
+      return isList ? 'polling' : 'write';
+    }
+    if (primary === 'config') {
+      const flags = commandArgs.slice(1).map((value) => optionName(String(value).toLowerCase()));
+      if (flags.some((flag) => ['--unset', '--unset-all', '--rename-section', '--remove-section', '--add', '--replace-all', '--edit', '-e'].includes(flag))) {
+        return 'write';
+      }
+      if (flags.some((flag) => ['--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list', '-l'].includes(flag))) return 'polling';
+      return commandArgs.length <= 2 ? 'polling' : 'write';
+    }
+    if (primary === 'symbolic-ref') {
+      const values = commandArgs.slice(1).filter((value) => !String(value).startsWith('-'));
+      return commandArgs.includes('--delete') || values.length >= 2 ? 'write' : 'polling';
+    }
+    if (primary === 'reflog') {
+      return ['expire', 'delete', 'write'].includes(secondary) ? 'write' : 'polling';
+    }
+    if (primary === 'hash-object' && commandArgs.includes('-w')) return 'write';
+    if (primary === 'submodule' && secondary === 'status') return 'polling';
+    // `ls-remote` has no local side effects and may overlap every local job.
+    // Fetch mutates remote refs/FETCH_HEAD, while push can update config and
+    // remote-tracking refs; they share a network lane but are serialized with
+    // local writes. `pull` remains a normal write because it also changes the
+    // index and working tree.
+    if (primary === 'ls-remote') return 'network-read';
+    if (primary === 'lfs') return this.classifyLfsCommand(secondary);
+    if (primary === 'fetch' || primary === 'push') return 'network';
+    if (this.shouldSerializeCommand(commandArgs)) return 'write';
+    if (primary === 'status') return 'polling';
+    if (['rev-parse', 'for-each-ref', 'symbolic-ref'].includes(primary)) return 'polling';
+    if (primary === 'diff' && commandArgs.includes('--numstat')) return 'background';
+    return 'interactive';
+  }
+
+  normalizeGitError(error: unknown, args: string[]): Error {
+    return this.errorFormatter.normalizeGitError(error, args);
+  }
+
+  private classifyLfsCommand(command: string): GitJobKind {
+    if (['push', 'fetch'].includes(command)) return 'network';
+    return ['version', 'env', 'ls-files', 'status'].includes(command) ? 'interactive' : 'write';
+  }
+
+  assertRepoPathAvailable(repoPath: string): void {
+    assertRepoPathAvailable(repoPath);
+  }
+
+  private shouldSerializeCommand(args: string[]): boolean {
+    const commandArgs = commandArguments(args);
+    const firstToken = String(commandArgs?.[0] || '')
+      .trim()
+      .toLowerCase();
+    if (!firstToken) return false;
+    return SERIALIZED_GIT_COMMANDS.has(firstToken);
+  }
+}

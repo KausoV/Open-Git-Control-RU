@@ -1,0 +1,282 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { RepoJobRegistry } from '../../../repoJobRegistry';
+import { registerSecretScanPushGuard } from '../secretScanPushGuard';
+import type { SecretScanProgressDto } from '../../../../../src/types/secretScan';
+
+const { handlers } = vi.hoisted(() => ({
+  handlers: new Map<string, (...args: any[]) => Promise<any>>(),
+}));
+
+vi.mock('electron', () => ({
+  ipcMain: {
+    handle: vi.fn((channel: string, callback: (...args: any[]) => Promise<any>) => handlers.set(channel, callback)),
+  },
+}));
+
+type PushState = {
+  allowlist: string;
+  head: string;
+  index: string;
+  remoteRef: string;
+  remoteUrl: string;
+};
+
+const findingsResult = {
+  scanned: true,
+  strictness: 'medium',
+  findings: [{ filePath: '.env', lineNumber: 1, contextLine: '[REDACTED_SECRET]' }],
+  notes: [],
+  stats: { checkedLines: 1, stagedLines: 1, toPushLines: 0, tagLines: 0 },
+};
+
+const createHarness = (scanPushDiffs: ReturnType<typeof vi.fn>) => {
+  const state: PushState = {
+    allowlist: '',
+    head: '1111111111111111111111111111111111111111',
+    index: 'H 100644 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 0\tapp.ts\0',
+    remoteRef: '1111111111111111111111111111111111111111',
+    remoteUrl: 'https://example.test/acme/repo.git',
+  };
+  const runCommandAtPath = vi.fn(async (_repoPath: string, args: string[]) => {
+    switch (args[0]) {
+      case 'status':
+        return `# branch.oid ${state.head}\0# branch.head main\0`;
+      case 'ls-files':
+        return state.index;
+      case 'for-each-ref':
+        return [`refs/heads/main\0${state.head}\0\0`, `refs/remotes/origin/main\0${state.remoteRef}\0\0`].join('\n');
+      case 'config':
+        return [
+          `remote.origin.url\n${state.remoteUrl}`,
+          'remote.origin.fetch\n+refs/heads/*:refs/remotes/origin/*',
+          'branch.main.remote\norigin',
+          'branch.main.merge\nrefs/heads/main',
+          'push.default\nsimple',
+          '',
+        ].join('\0');
+      default:
+        return 'push ok';
+    }
+  });
+  const gitService = {
+    getRepoPath: vi.fn(() => 'C:/repo'),
+    runCommandAtPath,
+  } as any;
+  const settings = { secretScanBeforePushEnabled: true, secretScanStrictness: 'medium' as const, secretScanAllowlist: '' };
+  const readSettingsWithMigration = vi.fn(() => settings as any);
+  const guard = registerSecretScanPushGuard({
+    gitService,
+    allowlistReader: {
+      read: () => ({ repoPath: 'C:/repo', relativePath: '', exists: Boolean(state.allowlist), text: state.allowlist, version: state.allowlist }),
+      prepare: async () => ({ repoPath: 'C:/repo', relativePath: '', exists: Boolean(state.allowlist), text: state.allowlist, version: state.allowlist }),
+      assertVersion: (_repo: string, version: string) => {
+        if (version !== state.allowlist) throw new Error('Secret-scan allowlist changed.');
+      },
+    },
+    secretScanService: { scanPushDiffs } as any,
+    readSettingsWithMigration,
+    repoJobRegistry: new RepoJobRegistry(),
+  });
+  const event = { sender: { id: 7, send: vi.fn() } };
+
+  return { state, runCommandAtPath, guard, event, readSettingsWithMigration };
+};
+
+describe('secret scan push state binding', () => {
+  it('does not reuse a one-shot approval after changing scan strictness', async () => {
+    const scan = vi.fn(async () => findingsResult as any);
+    const harness = createHarness(scan);
+    const args = ['origin', 'main'];
+    await handlers.get('git:scanPushSecrets')!(harness.event, { repoPath: 'C:/repo', pushArgs: args });
+    expect(await handlers.get('git:approveSecretScanPush')!(harness.event, args, 'C:/repo')).toEqual({ success: true });
+    harness.readSettingsWithMigration.mockReturnValue({ secretScanBeforePushEnabled: true, secretScanStrictness: 'high' } as any);
+    expect(await harness.guard.requirePushSecretScanApproval(harness.event, args, 'C:/repo')).toMatchObject({ success: false });
+    expect(scan).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps an explicitly requested scan cancellation informational', async () => {
+    const scan = vi.fn(
+      async ({ signal }: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(Object.assign(new Error('Git operation was aborted.'), { name: 'AbortError' })), { once: true });
+        }),
+    );
+    const harness = createHarness(scan);
+    const pending = handlers.get('git:scanPushSecrets')!(harness.event, { repoPath: 'C:/repo', pushArgs: ['origin', 'main'] });
+    await vi.waitFor(() => expect(scan).toHaveBeenCalledOnce());
+    await handlers.get('git:cancelSecretScan')!(harness.event, 'C:/repo');
+    expect(await pending).toEqual({ success: false, error: 'Secret scan cancelled.' });
+    expect(harness.event.sender.send).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ status: 'cancelled' }));
+  });
+  it('reports an unexpected Git interruption as a failed scan rather than a user cancellation', async () => {
+    const scan = vi.fn().mockRejectedValueOnce(Object.assign(new Error('Git operation was aborted.'), { name: 'AbortError' }));
+    const harness = createHarness(scan);
+    const result = await handlers.get('git:scanPushSecrets')!(harness.event, { repoPath: 'C:/repo', pushArgs: ['origin', 'main'] });
+    expect(result).toEqual({ success: false, error: 'Secret scan failed because a required Git read was interrupted.' });
+    expect(harness.event.sender.send).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ status: 'failed', message: result.error }));
+  });
+  it('prepares the migrated repository policy even when the first scan precedes the settings UI', async () => {
+    const scan = vi.fn().mockResolvedValue({ ...findingsResult, findings: [] });
+    const harness = createHarness(scan);
+    harness.readSettingsWithMigration.mockImplementation(() => {
+      harness.state.allowlist = 'path:docs/example.env';
+      return { secretScanBeforePushEnabled: true, secretScanStrictness: 'medium' };
+    });
+    const result = await handlers.get('git:scanPushSecrets')!(harness.event, { repoPath: 'C:/repo', pushArgs: ['origin', 'main'] });
+    expect(result.success).toBe(true);
+    expect(scan).toHaveBeenCalledWith(expect.objectContaining({ allowlistText: 'path:docs/example.env' }));
+  });
+  it('keeps a batch policy verifier bound to the saved version between endpoints', async () => {
+    const harness = createHarness(vi.fn().mockResolvedValue(findingsResult));
+    const verify = await harness.guard.createPushPolicyVerifier!('C:/repo');
+    expect(() => verify()).not.toThrow();
+    harness.state.allowlist = 'path:docs/example.env';
+    expect(() => verify()).toThrow('Secret-scan allowlist changed.');
+  });
+  it('uses a repository policy snapshot and blocks a mid-scan edit', async () => {
+    let harness: ReturnType<typeof createHarness>;
+    const scan = vi.fn(async ({ allowlistText }) => {
+      expect(allowlistText).toBe('path:sample.env');
+      harness.state.allowlist = '';
+      return { ...findingsResult, findings: [] };
+    });
+    harness = createHarness(scan);
+    harness.state.allowlist = 'path:sample.env';
+    expect(await handlers.get('git:scanPushSecrets')!(harness.event, { repoPath: 'C:/repo', pushArgs: ['origin', 'main'] })).toMatchObject({ success: false });
+  });
+
+  it('binds clean and manually granted push approvals to saved policy', async () => {
+    for (const findings of [[], findingsResult.findings]) {
+      const harness = createHarness(vi.fn().mockResolvedValue({ ...findingsResult, findings }));
+      const args = ['origin', 'main'];
+      await handlers.get('git:scanPushSecrets')!(harness.event, { repoPath: 'C:/repo', pushArgs: args });
+      if (findings.length) expect(await handlers.get('git:approveSecretScanPush')!(harness.event, args, 'C:/repo')).toEqual({ success: true });
+      harness.state.allowlist = 'path:sample.env';
+      expect(await harness.guard.requirePushSecretScanApproval(harness.event, args, 'C:/repo')).toMatchObject({
+        success: false,
+        error: expect.stringContaining('changed'),
+      });
+    }
+  });
+  beforeEach(() => {
+    handlers.clear();
+  });
+
+  it('requires an explicit repository for renderer scans and approvals', async () => {
+    const scanPushDiffs = vi.fn().mockResolvedValue(findingsResult);
+    const harness = createHarness(scanPushDiffs);
+
+    await expect(handlers.get('git:scanPushSecrets')!(harness.event, { pushArgs: [] })).resolves.toEqual({
+      success: false,
+      error: 'Repository path is required.',
+    });
+    await expect(handlers.get('git:approveSecretScanPush')!(harness.event, [], undefined)).resolves.toEqual({ success: false });
+    expect(scanPushDiffs).not.toHaveBeenCalled();
+    expect(harness.runCommandAtPath).not.toHaveBeenCalled();
+  });
+
+  it('rejects a renderer scan when HEAD changes while it is running', async () => {
+    let harness!: ReturnType<typeof createHarness>;
+    const scanPushDiffs = vi.fn(async () => {
+      harness.state.head = '2222222222222222222222222222222222222222';
+      return findingsResult;
+    });
+    harness = createHarness(scanPushDiffs);
+
+    const result = await handlers.get('git:scanPushSecrets')!(harness.event, { repoPath: 'C:/repo', pushArgs: [] });
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Repository state changed after the secret scan. Run the secret scan again before pushing.',
+    });
+  });
+
+  it('binds every progress event to the repository and scan request without exposing scanned contents', async () => {
+    const progress = { phase: 'history', checkedLines: 32000, processedCommits: 96, totalCommits: 205 } as const;
+    const scan = vi.fn(async ({ onScanProgress }: { onScanProgress: (event: SecretScanProgressDto) => void }) => {
+      onScanProgress(progress);
+      onScanProgress({ phase: 'verifying', checkedLines: 32001 });
+      return { ...findingsResult, stats: { ...findingsResult.stats, checkedLines: 32001 } };
+    });
+    const harness = createHarness(scan);
+    const result = await handlers.get('git:scanPushSecrets')!(harness.event, { repoPath: 'C:/repo', pushArgs: [], progressId: 'request-scan-1' });
+    expect(result.success, result.error).toBe(true);
+    const events = harness.event.sender.send.mock.calls.map(([, event]) => event);
+    expect(events.map(({ status }) => status)).toEqual(['start', 'progress', 'progress', 'done']);
+    for (const event of events) expect(event.details).toMatchObject({ repoPath: 'C:/repo', progressId: 'request-scan-1' });
+    expect(events[1].details.secretScan).toEqual(progress);
+    expect(events[2].details.secretScan).toEqual({ phase: 'verifying', checkedLines: 32001 });
+    expect(events[3].details.secretScan).toEqual({ phase: 'complete', checkedLines: 32001 });
+    expect(JSON.stringify(events)).not.toContain('[REDACTED_SECRET]');
+  });
+
+  it('keeps failure progress scoped and never reports an unsuccessful scan as complete', async () => {
+    const harness = createHarness(vi.fn().mockRejectedValue(new Error('Scan failed')));
+    const result = await handlers.get('git:scanPushSecrets')!(harness.event, { repoPath: 'C:/repo', progressId: 'failed-scan' });
+    expect(result.success).toBe(false);
+    const events = harness.event.sender.send.mock.calls.map(([, event]) => event);
+    expect(events.map(({ status }) => status)).toEqual(['start', 'failed']);
+    expect(events.at(-1).details).toMatchObject({ repoPath: 'C:/repo', progressId: 'failed-scan' });
+    expect(events.some((event) => event.details.secretScan?.phase === 'complete')).toBe(false);
+  });
+
+  it('rejects approval when exact staged index entries changed after the scan', async () => {
+    const harness = createHarness(vi.fn().mockResolvedValue(findingsResult));
+    await handlers.get('git:scanPushSecrets')!(harness.event, { repoPath: 'C:/repo', pushArgs: ['origin', 'main'] });
+    harness.state.index = 'H 100644 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 0\tapp.ts\0';
+
+    const result = await handlers.get('git:approveSecretScanPush')!(harness.event, ['origin', 'main'], 'C:/repo');
+
+    expect(result).toEqual({ success: false });
+  });
+
+  it('invalidates an approved one-shot bypass when remote push configuration changes', async () => {
+    const harness = createHarness(vi.fn().mockResolvedValue(findingsResult));
+    await handlers.get('git:scanPushSecrets')!(harness.event, { repoPath: 'C:/repo', pushArgs: ['origin', 'main'] });
+    await expect(handlers.get('git:approveSecretScanPush')!(harness.event, ['origin', 'main'], 'C:/repo')).resolves.toEqual({ success: true });
+    harness.state.remoteUrl = 'https://mirror.example.test/acme/repo.git';
+
+    const result = await harness.guard.requirePushSecretScanApproval(harness.event, ['origin', 'main'], 'C:/repo');
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Repository state changed after the secret scan. Run the secret scan again before pushing.',
+    });
+  });
+
+  it('blocks a direct push with findings until the renderer confirms the in-app dialog', async () => {
+    const harness = createHarness(vi.fn().mockResolvedValue(findingsResult));
+
+    const result = await harness.guard.requirePushSecretScanApproval(harness.event, [], 'C:/repo');
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Potential secrets were detected. Confirm the in-app dialog before pushing.',
+    });
+  });
+
+  it.each([{ findings: [] }, { findings: findingsResult.findings }])('never authorizes an incomplete scan, with findings $findings', async ({ findings }) => {
+    const incomplete = { ...findingsResult, findings, historyScanIncomplete: true };
+    const harness = createHarness(vi.fn().mockResolvedValue(incomplete));
+    const args = ['origin', 'main'];
+    await handlers.get('git:scanPushSecrets')!(harness.event, { repoPath: 'C:/repo', pushArgs: args });
+    expect(await handlers.get('git:approveSecretScanPush')!(harness.event, args, 'C:/repo')).toEqual({ success: false });
+    expect(await harness.guard.requirePushSecretScanApproval(harness.event, args, 'C:/repo')).toMatchObject({
+      success: false,
+      error: expect.stringContaining('could not be fully scanned'),
+    });
+  });
+
+  it('redacts fingerprint command errors instead of returning embedded credentials', async () => {
+    const harness = createHarness(vi.fn().mockResolvedValue(findingsResult));
+    harness.runCommandAtPath.mockRejectedValueOnce(new Error('fatal: https://user:plain-secret@example.test/repo.git failed'));
+
+    const result = await harness.guard.requirePushSecretScanApproval(harness.event, [], 'C:/repo');
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Repository state could not be verified. Run the secret scan again before pushing.',
+    });
+    expect(JSON.stringify(result)).not.toContain('plain-secret');
+  });
+});

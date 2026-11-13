@@ -1,0 +1,147 @@
+import type { HostedRepositoryRef, RepositoryEndpoint } from './hostingDtos';
+
+export interface GitRemoteDto {
+  name: string;
+  fetchUrls: string[];
+  pushUrls: string[];
+}
+export interface GitRemoteSnapshotDto {
+  repoPath: string;
+  branch: string;
+  upstream: { remote: string; branch: string } | null;
+  defaultPushRemote: string | null;
+  remotes: GitRemoteDto[];
+  supportsPushUrlIsolation: boolean;
+}
+export interface RemoteMutation {
+  action: 'add' | 'remove' | 'rename' | 'set-url';
+  name: string;
+  url?: string;
+  newName?: string;
+  pushUrls?: string[];
+}
+export interface GitPushProfile {
+  id: string;
+  name: string;
+  remoteNames: string[];
+  destinationBranch?: string;
+  targetBranches?: Record<string, string>;
+  tagNames?: string[];
+}
+export type RemoteTransferAction = 'fetch' | 'pull' | 'push';
+export type RemoteSelectionMode = 'remember' | 'ask';
+export type PullStrategy = 'default' | 'rebase' | 'merge' | 'ff-only';
+export type PullMode = PullStrategy | 'no-ff';
+export interface GitPullConfigurationDto {
+  branch: string;
+  rebase: { key: string; value: 'false' | 'true' | 'merges' | 'interactive' } | null;
+  fastForward: { key: string; value: 'false' | 'true' | 'only' } | null;
+  mergeOptions: string | null;
+}
+export interface GitPullRecoveryDto {
+  branchExists: boolean;
+  defaultBranch: { name: string; localExists: boolean } | null;
+}
+export interface RemoteSelectionSnapshot {
+  remotes: Array<{ name: string; urls: string[]; bindings: RepositoryEndpoint[] }>;
+}
+export interface RemotePreferences {
+  hostingRemote?: string;
+  hostingRepository?: HostedRepositoryRef;
+  bindings?: RepositoryEndpoint[];
+  fetchRemote?: string;
+  pullRemote?: string;
+  /** Absence preserves the existing Git configuration. One-off overrides are never stored here. */
+  pullStrategy?: PullStrategy;
+  selectionModes?: Partial<Record<RemoteTransferAction, RemoteSelectionMode>>;
+  selectionSnapshots?: Partial<Record<RemoteTransferAction, RemoteSelectionSnapshot>>;
+  pullBranches?: Record<string, string>;
+  pushBranches?: Record<string, Record<string, string>>;
+  pushRemotes?: string[];
+  profiles?: GitPushProfile[];
+  activeProfileId?: string;
+}
+export interface GitPushTargetDto {
+  lfsEndpoint?: string;
+  grouped?: boolean;
+  id: string;
+  remoteName: string;
+  url: string;
+  destinationRef: string;
+  sourceOid: string;
+  leaseOid?: string | null;
+}
+export interface GitPushPlanDto {
+  lfsObjects?: Array<{ oid: string; size: number }>;
+  id: string;
+  /** Push operands without the subcommand: plan marker followed by captured OID refspecs. */
+  secretScanArgs: string[];
+  repoPath: string;
+  sourceOid: string;
+  branch: string;
+  tagNames: string[];
+  sourceBranch?: string;
+  branchRefs?: Array<{ sourceBranch: string; destinationBranch: string; sourceOid: string }>;
+  tagRefs?: Array<{ name: string; oid: string }>;
+  force: boolean;
+  targets: GitPushTargetDto[];
+}
+export type GitPushTargetStatus = 'success' | 'up-to-date' | 'rejected' | 'failed' | 'unknown' | 'skipped';
+export interface GitPushTargetResultDto extends GitPushTargetDto {
+  status: GitPushTargetStatus;
+  message: string;
+  refResults?: Array<{ destinationRef: string; sourceOid: string; status: GitPushTargetStatus; message: string }>;
+}
+export interface GitPushBatchDto {
+  id: string;
+  planId: string;
+  repoPath: string;
+  sourceOid: string;
+  state: 'success' | 'partial' | 'failed' | 'cancelled';
+  targets: GitPushTargetResultDto[];
+}
+export interface RemoteTransferOperations {
+  checkConnection: { input: { repoPath: string; remote: string; url: string; connectionId?: string | null }; output: true };
+  getRemotes: { input: { repoPath: string }; output: GitRemoteSnapshotDto };
+  editRemote: { input: { repoPath: string; mutation: RemoteMutation }; output: GitRemoteSnapshotDto };
+  getPreferences: { input: { repoPath: string }; output: RemotePreferences };
+  getPullConfiguration: { input: { repoPath: string }; output: GitPullConfigurationDto };
+  getPullRecovery: { input: { repoPath: string; remote: string; branch: string }; output: GitPullRecoveryDto };
+  preparePullRecovery: { input: { repoPath: string; remote: string; branch: string; defaultBranch: string }; output: GitPullRecoveryDto };
+  setPreferences: { input: { repoPath: string; preferences: RemotePreferences }; output: RemotePreferences };
+  fetch: {
+    input: {
+      repoPath: string;
+      remote: string;
+      tagsOnly?: boolean;
+      /** Fetch branches and tracked remote tags together, then adopt only missing local tags. */
+      includeTags?: boolean;
+      background?: boolean;
+    };
+    /** Deferred automatic syncs have not completed and must not publish success. */
+    output: { output: string; deferred?: true; refsChanged?: boolean };
+  };
+  pull: { input: { repoPath: string; remote: string; branch: string; mode: PullMode; autostash?: boolean }; output: { output: string } };
+  setUpstream: { input: { repoPath: string; remote: string; branch: string }; output: true };
+  planPush: {
+    input: {
+      repoPath: string;
+      remoteNames: string[];
+      sourceBranch?: string;
+      branchTargets?: Array<{ sourceBranch: string; destinationBranch: string }>;
+      destinationBranch?: string;
+      targetBranches?: Record<string, string>;
+      targetUrls?: Record<string, string[]>;
+      tagNames?: string[];
+      force?: boolean;
+      /** Reviewed UI context; Main compares it with its own fresh snapshot. */
+      expectedBranch?: string;
+      expectedSelection?: RemoteSelectionSnapshot;
+    };
+    output: GitPushPlanDto;
+  };
+  executePush: { input: { repoPath: string; planId: string }; output: GitPushBatchDto };
+  retryPush: { input: { repoPath: string; batchId: string; targetIds?: string[] }; output: GitPushBatchDto };
+  cancel: { input: { repoPath: string }; output: true };
+}
+export type RemoteTransferOperation = keyof RemoteTransferOperations;
